@@ -74,7 +74,7 @@ def init_board():
 class SmartChessboard:
     def __init__(self):
         # Set up display
-        self.screen = pygame.display.set_mode((BOARD_SIZE, BOARD_SIZE))
+        self.screen = pygame.display.set_mode((BOARD_SIZE + 200, BOARD_SIZE))  # Extra width for captured pieces
         pygame.display.set_caption("Smart Chessboard Simulation")
         self.clock = pygame.time.Clock()
         
@@ -91,8 +91,13 @@ class SmartChessboard:
         self.moving_hardware = False
         self.hardware_move_start = None
         self.hardware_move_end = None
-        self.hardware_move_progress = 0
+        self.hardware_move_progress = 0.0
+        self.captured_piece = None
         
+        # Lists to track captured pieces
+        self.captured_white = []
+        self.captured_black = []
+    
     def draw_board(self):
         # Draw the chess board
         for row in range(8):
@@ -208,7 +213,7 @@ class SmartChessboard:
             # Scale down the piece for captured area
             scaled_img = pygame.transform.scale(piece_img, (30, 30))
             self.screen.blit(scaled_img, (x, y))
-            
+    
     def _simulate_hardware_movement(self):
         # This method simulates the hardware movement of chess pieces
         if self.hardware_move_progress < 1.0:
@@ -422,37 +427,6 @@ class SmartChessboard:
         # 
         # # Deactivate the electromagnet at the destination
         # self._deactivate_electromagnet()
-        
-    def _calculate_capture_path(self, row, col):
-        """
-        Calculate a path to move a captured piece off the board
-        """
-        # This would determine the best path to move a captured piece to the appropriate area
-        piece = self.board[row][col]
-        points = []
-        
-        # Determine the destination based on piece color
-        if piece.startswith('w'):  # white piece captured by black
-            dest_x = BOARD_SIZE + 100
-            dest_y = 200
-        else:  # black piece captured by white
-            dest_x = BOARD_SIZE + 100
-            dest_y = BOARD_SIZE - 200
-            
-        # Convert board coordinates to screen coordinates
-        start_x = col * SQUARE_SIZE + SQUARE_SIZE // 2
-        start_y = row * SQUARE_SIZE + SQUARE_SIZE // 2
-        
-        # Create a path with multiple points to ensure smooth movement
-        steps = 20
-        for i in range(steps + 1):
-            t = i / steps
-            x = start_x + (dest_x - start_x) * t
-            y = start_y + (dest_y - start_y) * t
-            # Convert back to board coordinates (might be outside the board)
-            points.append((y / SQUARE_SIZE, x / SQUARE_SIZE))
-            
-        return points
     
     def _activate_electromagnet(self, row, col):
         """
@@ -500,6 +474,37 @@ class SmartChessboard:
             points.append((row, col))
         return points
     
+    def _calculate_capture_path(self, row, col):
+        """
+        Calculate a path to move a captured piece off the board
+        """
+        # This would determine the best path to move a captured piece to the appropriate area
+        piece = self.board[row][col]
+        points = []
+        
+        # Determine the destination based on piece color
+        if piece.startswith('w'):  # white piece captured by black
+            dest_x = BOARD_SIZE + 100
+            dest_y = 200
+        else:  # black piece captured by white
+            dest_x = BOARD_SIZE + 100
+            dest_y = BOARD_SIZE - 200
+            
+        # Convert board coordinates to screen coordinates
+        start_x = col * SQUARE_SIZE + SQUARE_SIZE // 2
+        start_y = row * SQUARE_SIZE + SQUARE_SIZE // 2
+        
+        # Create a path with multiple points to ensure smooth movement
+        steps = 20
+        for i in range(steps + 1):
+            t = i / steps
+            x = start_x + (dest_x - start_x) * t
+            y = start_y + (dest_y - start_y) * t
+            # Convert back to board coordinates (might be outside the board)
+            points.append((y / SQUARE_SIZE, x / SQUARE_SIZE))
+            
+        return points
+    
     def reset_board(self):
         """Reset the board to the initial state"""
         self.board = init_board()
@@ -520,6 +525,7 @@ class SmartChessboard:
         print("- Press 'r' to reset the board")
         print("- Collision detection prevents placing pieces on occupied squares")
         print("- Each piece is labeled with its type and color")
+        print("- You can capture enemy pieces by moving onto their square")
         print("======================================\n")
         
         while running:
