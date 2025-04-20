@@ -150,9 +150,64 @@ class SmartChessboard:
                 ))
                 self.screen.blit(label_img, label_rect)
         
+        # Draw captured pieces area
+        self._draw_captured_pieces()
+        
         # Draw hardware movement simulation
         if self.moving_hardware:
             self._simulate_hardware_movement()
+            
+    def _draw_captured_pieces(self):
+        # Draw the captured pieces area
+        pygame.draw.rect(
+            self.screen, 
+            (50, 50, 50),  # Dark gray background
+            (BOARD_SIZE, 0, 200, BOARD_SIZE)
+        )
+        
+        # Draw title for captured pieces
+        font = pygame.font.SysFont('Arial', 20)
+        title = font.render("Captured Pieces", True, WHITE)
+        self.screen.blit(title, (BOARD_SIZE + 20, 20))
+        
+        # Draw separator line
+        pygame.draw.line(
+            self.screen,
+            WHITE,
+            (BOARD_SIZE, BOARD_SIZE // 2),
+            (BOARD_SIZE + 200, BOARD_SIZE // 2),
+            2
+        )
+        
+        # Draw white captured pieces
+        white_title = font.render("Black captured:", True, WHITE)
+        self.screen.blit(white_title, (BOARD_SIZE + 20, 60))
+        
+        for i, piece in enumerate(self.captured_black):
+            piece_img = self.pieces[piece]['symbol']
+            row = i // 4
+            col = i % 4
+            x = BOARD_SIZE + 25 + col * 40
+            y = 100 + row * 40
+            
+            # Scale down the piece for captured area
+            scaled_img = pygame.transform.scale(piece_img, (30, 30))
+            self.screen.blit(scaled_img, (x, y))
+        
+        # Draw black captured pieces
+        black_title = font.render("White captured:", True, WHITE)
+        self.screen.blit(black_title, (BOARD_SIZE + 20, BOARD_SIZE // 2 + 30))
+        
+        for i, piece in enumerate(self.captured_white):
+            piece_img = self.pieces[piece]['symbol']
+            row = i // 4
+            col = i % 4
+            x = BOARD_SIZE + 25 + col * 40
+            y = BOARD_SIZE // 2 + 70 + row * 40
+            
+            # Scale down the piece for captured area
+            scaled_img = pygame.transform.scale(piece_img, (30, 30))
+            self.screen.blit(scaled_img, (x, y))
             
     def _simulate_hardware_movement(self):
         # This method simulates the hardware movement of chess pieces
@@ -182,6 +237,45 @@ class SmartChessboard:
                 10
             )
             
+            # If there's a captured piece, show it moving to the captured area
+            if self.captured_piece:
+                # Calculate where the captured piece should go (off the board)
+                capture_progress = min(self.hardware_move_progress * 2, 1.0)  # Move twice as fast
+                
+                if self.captured_piece[0] == 'w':  # white piece captured
+                    # Move it to the black capture area (top right)
+                    capture_x = BOARD_SIZE + 100
+                    capture_y = 200
+                else:  # black piece captured
+                    # Move it to the white capture area (bottom right)
+                    capture_x = BOARD_SIZE + 100
+                    capture_y = BOARD_SIZE - 200
+                
+                # Start position is the end position where the capturing piece will land
+                start_x = end_col * SQUARE_SIZE + SQUARE_SIZE // 2
+                start_y = end_row * SQUARE_SIZE + SQUARE_SIZE // 2
+                
+                # Calculate current position for the captured piece
+                captured_x = start_x + (capture_x - start_x) * capture_progress
+                captured_y = start_y + (capture_y - start_y) * capture_progress
+                
+                # Draw the captured piece path
+                pygame.draw.line(
+                    self.screen,
+                    (0, 0, 255),  # Blue line
+                    (start_x, start_y),
+                    (capture_x, capture_y),
+                    2
+                )
+                
+                # Draw the captured piece moving
+                pygame.draw.circle(
+                    self.screen,
+                    (0, 0, 255),  # Blue circle
+                    (int(captured_x), int(captured_y)),
+                    8
+                )
+            
             # Increment progress
             self.hardware_move_progress += 0.02
             
@@ -191,6 +285,7 @@ class SmartChessboard:
                 self.board[self.hardware_move_start[0]][self.hardware_move_start[1]] = ''
                 self.board[self.hardware_move_end[0]][self.hardware_move_end[1]] = piece
                 self.moving_hardware = False
+                self.captured_piece = None
     
     def handle_click(self, pos):
         col = pos[0] // SQUARE_SIZE
@@ -249,11 +344,26 @@ class SmartChessboard:
         """Move a piece from start position to end position with hardware simulation"""
         # Only proceed if start and end positions are different
         if (start_row, start_col) != (end_row, end_col):
-            # Check if the destination square is already occupied
-            if self.board[end_row][end_col] != '':
-                print(f"Cannot move to ({end_row}, {end_col}) - square is already occupied by {PIECE_NAMES[self.board[end_row][end_col]]}")
-                return False
-                
+            moving_piece = self.board[start_row][start_col]
+            target_square = self.board[end_row][end_col]
+            
+            # Check if the target square is occupied
+            if target_square != '':
+                # If occupied by same color, prevent movement
+                if moving_piece[0] == target_square[0]:  # First character indicates color ('w' or 'b')
+                    print(f"Cannot move to ({end_row}, {end_col}) - square is already occupied by a piece of the same color: {PIECE_NAMES[target_square]}")
+                    return False
+                # If occupied by enemy, capture
+                else:
+                    print(f"{PIECE_NAMES[moving_piece]} captures {PIECE_NAMES[target_square]}!")
+                    # Store the captured piece
+                    self.captured_piece = target_square
+                    # Add to appropriate captured list
+                    if target_square[0] == 'w':
+                        self.captured_white.append(target_square)
+                    else:
+                        self.captured_black.append(target_square)
+            
             # Start hardware movement simulation
             self.moving_hardware = True
             self.hardware_move_start = (start_row, start_col)
@@ -271,23 +381,78 @@ class SmartChessboard:
         In a real implementation, this would communicate with your electromagnets,
         motors, or other physical components.
         """
-        print(f"Hardware Command: Move piece from ({start_row}, {start_col}) to ({end_row}, {end_col})")
+        # Check if this is a capture move
+        target_piece = self.board[end_row][end_col]
+        moving_piece = self.board[start_row][start_col]
         
+        if target_piece == '':
+            print(f"Hardware Command: Move {PIECE_NAMES[moving_piece]} from ({start_row}, {start_col}) to ({end_row}, {end_col})")
+        else:
+            print(f"Hardware Command: Move {PIECE_NAMES[moving_piece]} from ({start_row}, {start_col}) to capture {PIECE_NAMES[target_piece]} at ({end_row}, {end_col})")
+            
         # For a real implementation, this might look like:
         # 
+        # # If capturing, first move the captured piece to the captured area
+        # if target_piece != '':
+        #     # Calculate path for the captured piece to move off board
+        #     capture_path = self._calculate_capture_path(end_row, end_col)
+        #     
+        #     # Activate the electromagnet at the captured piece position
+        #     self._activate_electromagnet(end_row, end_col)
+        #     
+        #     # Move the electromagnet along the capture path
+        #     for point in capture_path:
+        #         self._move_electromagnet_to(point[0], point[1])
+        #         time.sleep(0.01)
+        #     
+        #     # Deactivate electromagnet to drop piece in captured area
+        #     self._deactivate_electromagnet()
+        # 
+        # # Now move the capturing piece
         # # Activate the electromagnet at the starting position
         # self._activate_electromagnet(start_row, start_col)
         # 
-        # # Calculate path for the piece to follow
+        # # Calculate path for the piece to follow (avoiding other pieces)
         # path = self._calculate_path(start_row, start_col, end_row, end_col)
         # 
         # # Move the electromagnet along the path
         # for point in path:
         #     self._move_electromagnet_to(point[0], point[1])
-        #     time.sleep(0.01)  # Small delay for smooth movement
+        #     time.sleep(0.01)
         # 
         # # Deactivate the electromagnet at the destination
         # self._deactivate_electromagnet()
+        
+    def _calculate_capture_path(self, row, col):
+        """
+        Calculate a path to move a captured piece off the board
+        """
+        # This would determine the best path to move a captured piece to the appropriate area
+        piece = self.board[row][col]
+        points = []
+        
+        # Determine the destination based on piece color
+        if piece.startswith('w'):  # white piece captured by black
+            dest_x = BOARD_SIZE + 100
+            dest_y = 200
+        else:  # black piece captured by white
+            dest_x = BOARD_SIZE + 100
+            dest_y = BOARD_SIZE - 200
+            
+        # Convert board coordinates to screen coordinates
+        start_x = col * SQUARE_SIZE + SQUARE_SIZE // 2
+        start_y = row * SQUARE_SIZE + SQUARE_SIZE // 2
+        
+        # Create a path with multiple points to ensure smooth movement
+        steps = 20
+        for i in range(steps + 1):
+            t = i / steps
+            x = start_x + (dest_x - start_x) * t
+            y = start_y + (dest_y - start_y) * t
+            # Convert back to board coordinates (might be outside the board)
+            points.append((y / SQUARE_SIZE, x / SQUARE_SIZE))
+            
+        return points
     
     def _activate_electromagnet(self, row, col):
         """
@@ -341,6 +506,9 @@ class SmartChessboard:
         self.selected_piece = None
         self.dragging = False
         self.moving_hardware = False
+        self.captured_piece = None
+        self.captured_white = []
+        self.captured_black = []
     
     def run(self):
         """Main game loop"""
