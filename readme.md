@@ -1,149 +1,121 @@
-# Smart Chessboard with Electromagnetic Control
+# Electromagnetic Chess Simulation
 
-A simulation and control system for a smart chessboard that uses a 20×20 grid of electromagnets to physically move chess pieces. The system includes advanced pathfinding for piece movement, collision avoidance, and support for both simulated and real hardware control.
+This project simulates a smart chessboard that uses a grid of electromagnets to control the movement of chess pieces. It includes a physics simulation for piece movement driven by calculated magnetic forces (or a PID controller) and provides visualizations of the board, pieces, coil activations, and magnetic fields.
+
+## Goal
+
+The primary goal is to develop and simulate the control system required to move chess pieces smoothly, accurately, and autonomously across a board using an underlying electromagnet grid. This involves:
+1.  Simulating the physics of piece movement under magnetic forces.
+2.  Developing effective coil activation patterns to generate desired forces.
+3.  Implementing control strategies (like PID) to ensure pieces reach their target squares precisely without oscillation or unintended interactions.
+4.  Visualizing the system's state for debugging and analysis.
+5.  Providing an interface for potential integration with physical hardware.
 
 ## Features
 
-- **Smart Piece Movement**: Magnetically move chess pieces using a 20×20 electromagnet grid (400 coils)
-- **Advanced Pathfinding**: A* algorithm for optimal movement paths and obstacle avoidance
-- **Capture Visualization**: Captured pieces follow intelligent paths off the board
-- **Piece Recognition**: Pieces labeled with type and color for easy identification
-- **Real-time Visualization**: See electromagnet activation patterns in real-time
-- **Dual-mode Operation**: Run in simulation mode or control actual hardware
-- **RS-485 Communication**: Star-connected 3-wire protocol for efficient coil control
-- **Standard Dimensions**: Based on tournament chess standards (55mm squares)
+*   **Chess Board Simulation:** Displays a standard 8x8 chessboard.
+*   **Piece Representation:** Uses Unicode characters to represent chess pieces with defined physical properties (diameter, height, magnet strength).
+*   **Coil Grid Simulation:** Simulates a 20x20 grid of electromagnets beneath the board.
+*   **Coil Activation Patterns:** Implements various strategies (`directed`, `radial`, `knight`, `straight_horizontal`, `straight_vertical`) to activate coils for moving pieces.
+*   **Physics Engine:** Basic simulation of piece dynamics (position, velocity, acceleration) based on applied forces.
+*   **PID Control:** Implements a Proportional-Integral-Derivative (PID) controller to directly calculate the force required for precise piece movement, aiming to eliminate errors and oscillations.
+*   **Visualization:**
+    *   Displays piece positions and movement paths.
+    *   Visualizes active coils and their polarity (attraction/repulsion).
+    *   Can optionally display calculated magnetic field vectors.
+    *   Can optionally display a heatmap of magnetic field strength.
+*   **Obstacle Avoidance (Coils):** Implemented coil masking to prevent activating coils directly under stationary pieces during a move.
+*   **Pathfinding (Captures):** Uses A* algorithm to calculate paths for captured pieces to move off the board.
+*   **Hardware Abstraction:** Includes a basic `ElectromagnetController` class to separate simulation logic from hardware communication (currently runs in simulation mode).
+*   **Interactive Controls:** Allows selecting pieces, setting targets, resetting the board, toggling visualizations, adjusting simulation speed, and cycling through patterns via keyboard and mouse.
 
-## Installation
+## Project Structure
+Use code with caution.
+Markdown
+.
+├── main.py # Main entry point, argument parsing, simulation setup
+├── chess_simulation.py # Core simulation logic, ChessBoard class, update loop
+├── chess_pieces.py # ChessPiece class definition, properties, constants
+├── coil_controller.py # CoilGrid class, coil patterns, field/force simulation, visualizations
+├── pathfinding.py # PathFinder class (A*) for capture paths
+├── visualization.py # ChessRenderer class for drawing board, pieces, UI
+├── hardware_interface.py # ElectromagnetController class (hardware communication abstraction)
+├── field_heatmap.png # Generated heatmap image (temporary)
+└── README.md # This file
+## Setup / Installation
 
-### Prerequisites
+1.  **Python:** Ensure you have Python 3 installed (developed with 3.11).
+2.  **Dependencies:** Install required libraries using pip:
+    ```bash
+    pip install pygame numpy matplotlib scipy
+    ```
+3.  **Hardware Libraries (Optional):** If you intend to run with physical hardware controlled via Serial/GPIO, you might need:
+    ```bash
+    pip install pyserial
+    # On Raspberry Pi or similar for GPIO:
+    # pip install RPi.GPIO
+    ```
+    *Note: These are **not** required to run in simulation mode.*
 
-- Python 3.7+
-- Pygame library
-- PySerial (for hardware control)
-- RPi.GPIO (for Raspberry Pi hardware control)
+## Running the Simulation
 
-### Setup
+Execute the main script from your terminal:
 
-1. Clone the repository
 ```bash
-git clone https://github.com/username/smart-chessboard.git
-cd smart-chessboard
-```
-
-2. Install the required packages
-```bash
-pip install pygame pyserial RPi.GPIO
-```
-
-3. Run the simulation
-```bash
-python simulation.py
-```
-
-## Usage
-
-### Simulation Controls
-
-- **Drag and Drop**: Move chess pieces with your mouse
-- **'r' key**: Reset the board to initial position
-- **'c' key**: Toggle electromagnet coil visualization
-- **'p' key**: Toggle path planning visualization 
-- **'h' key**: Toggle between simulation and hardware control modes
-
-### Hardware Mode
-
-To connect to real hardware:
-
-1. Connect your RS-485 interface to the computer
-2. Update the `com_port` parameter in `hardware_controller.py` to match your setup
-3. Press the 'h' key in the simulation to activate hardware control mode
-
-## Hardware Requirements
-
-### Chess Pieces and Board
-
-- **Board Size**: 440mm × 440mm (8×8 grid of 55mm squares)
-- **Chess Pieces**: Standard Staunton design with ferromagnetic material in base
-- **Piece Base Diameters**:
-  - King: 40mm
-  - Queen: 38mm
-  - Bishop/Knight: 35mm
-  - Rook: 33mm
-  - Pawn: 29mm
-
-### Electromagnet System
-
-- **Grid Size**: 20×20 coils (400 total)
-- **Coil Spacing**: 22mm between centers
-- **Coil Diameter**: 20mm
-- **Communication**: RS-485 protocol with 3-wire star connection
-- **Control System**: Microcontroller with RS-485 transceiver
-
-## Software Architecture
-
-The project consists of two main components:
-
-1. **Simulation Module** (`simulation.py`):
-   - Game board visualization
-   - Chess rules and movement logic
-   - Piece capture handling
-   - A* pathfinding for collision avoidance
-   - Electromagnet visualization
-   - User interface
-
-2. **Hardware Controller** (`hardware_controller.py`):
-   - RS-485 protocol implementation
-   - Coil power management
-   - Path calculation and following
-   - Graceful degradation to simulation mode
-   - Alternative CAN bus implementation
-
-## How the Electromagnet System Works
-
-The smart chessboard uses a grid of 400 electromagnets underneath the board surface to move chess pieces:
-
-1. Each piece contains ferromagnetic material in its base
-2. The system activates specific electromagnets to create a magnetic "pull"
-3. A radial pattern of decreasing magnetic strength creates a gradient
-4. The gradient pulls pieces toward the strongest point
-5. By sequentially activating coils along a path, pieces can be moved smoothly
-6. The A* algorithm calculates optimal paths that avoid collisions with other pieces
-
-## Implementation Details
-
-### Pathfinding Algorithm
-
-The A* pathfinding algorithm considers:
-
-- Physical size of each chess piece (different for pawns, kings, etc.)
-- Current positions of all pieces on the board
-- Shortest path to destination
-- Special handling for captured pieces moving off the board
-
-### Coil Control
-
-Each electromagnet coil can be individually controlled with variable power levels:
-
-- Power levels range from 0-100%
-- Radial activation pattern for smooth movement
-- Multiple pieces can be moved simultaneously (capturing piece and captured piece)
-- Gradual power transitions prevent jerky movements
-
-## Future Improvements
-
-- Add chess rules enforcement
-- Implement automatic gameplay against a chess engine
-- Add piece recognition using sensors or computer vision
-- Optimize power consumption by improving path efficiency
-- Add wireless capability (Bluetooth/WiFi)
-- Create a mobile app interface
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- Chess piece dimension standards from FIDE
-- A* pathfinding algorithm based on standard implementations
-- RS-485 protocol design based on industrial automation standards
+python main.py
+Use code with caution.
+Command-line Arguments:
+--hardware: (Flag) Attempt to run in hardware control mode instead of simulation. Requires hardware libraries and correct setup.
+--port <PORT_NAME>: Specify the serial port for hardware communication (e.g., COM3 on Windows, /dev/ttyACM0 or /dev/ttyUSB0 on Linux). Default: /dev/ttyUSB0.
+--baud <RATE>: Specify the serial baud rate. Default: 115200.
+--dirpin <GPIO_PIN>: Specify the BCM GPIO pin number for RS485 direction control (if needed). Default: None.
+--debug: (Flag) Enable extra debug output in the console (overrides the default in ChessBoard.__init__).
+Example (Hardware Mode on COM4):
+python main.py --hardware --port COM4
+Use code with caution.
+Bash
+Controls
+Mouse Click:
+Click on a piece to select it.
+Click on a target square to initiate a move for the selected piece.
+Click the selected piece's square again to deselect.
+Keyboard:
+R: Reset the board to the starting position.
+M: Cycle through the default coil activation patterns (directed, knight, radial) used for visualization/hardware.
+C: Toggle visualization of active coils.
+F: Toggle visualization of magnetic field vectors.
+P: Toggle visualization of piece movement paths.
+H: Toggle display of the magnetic field strength heatmap.
+D: Toggle detailed debug output in the console (useful for PID tuning).
++/- (Plus/Minus keys): Adjust simulation speed.
+Esc: Quit the simulation.
+Current Status & Challenges
+The simulation currently uses a Direct PID Force Control strategy. The PID controller calculates the necessary force based on the piece's position error and velocity, and this force is directly applied in the physics simulation. The coil activation patterns are used for visualization and potentially sending commands to hardware but do not directly drive the simulated physics.
+Key Challenges & Areas for Improvement:
+PID Tuning: This is the primary current challenge. The PID gains (Kp, Ki, Kd in chess_simulation.py) need careful tuning to achieve the desired performance:
+Convergence: Pieces should stop precisely at the center of the target square with minimal offset before the final snap.
+Overshoot: The piece should not significantly overshoot the target.
+Oscillation: The piece should settle quickly without oscillating around the target.
+Responsiveness: The movement should be reasonably fast.
+Current Status: The direct PID force method has eliminated gross oscillations seen previously, and convergence is close, but fine-tuning is required to eliminate the small offset before the final snap and ensure smooth settling across different move types. The Ki term (integral) needs careful introduction to handle the final offset without causing instability.
+Diagonal Drift: While significantly reduced by the direct PID force, slight diagonal drift during nominally straight moves can still occur if there are minor asymmetries or noise. Fine-tuning the PID might mitigate this further. The dedicated straight_horizontal and straight_vertical coil patterns help ensure the visualized/hardware command is axially aligned.
+Coil Masking (_create_keep_out_mask): The current implementation prevents activating coils directly under stationary pieces. The keep_out_radius_coils parameter might need tuning to balance avoiding interference with providing enough controllable field near other pieces.
+Physics Model: The current physics model is basic (mass proportional to volume, simple velocity/acceleration updates). Adding static/dynamic friction could make the simulation more realistic but also complicate PID tuning.
+Coil Patterns: While PID now drives the force, the underlying patterns (directed, knight, etc.) are still used for visuals and hardware commands. Their effectiveness in generating useful fields could still be improved, especially the knight pattern.
+Future Work / Improvements
+Systematic PID tuning to find optimal gains for different piece types or move distances.
+Implement more sophisticated physics (friction, collisions).
+Refine coil activation patterns for efficiency and reduced interference.
+Simulate sensor feedback (e.g., Hall effect sensors, camera) to close the loop for the PID controller based on measured position instead of simulated position.
+Full hardware integration and testing using the ElectromagnetController interface.
+GUI improvements (e.g., better display of PID state, captured pieces).
+Integration with a chess engine (like Stockfish) for automated play.
+Advanced control techniques (e.g., feedforward control, adaptive PID).
+Dependencies
+Python 3.x
+Pygame (pip install pygame)
+NumPy (pip install numpy)
+Matplotlib (pip install matplotlib)
+SciPy (pip install scipy)
+PySerial (Optional, for hardware) (pip install pyserial)
+RPi.GPIO (Optional, for hardware) (pip install RPi.GPIO)
