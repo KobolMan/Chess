@@ -182,17 +182,27 @@ class CoilGrid:
         return force
     # --- **** END IMPROVEMENT **** ---
 
-    def draw(self, surface, board_pixel_size): # No changes
-        coil_pixel_size=board_pixel_size/self.size; coil_surface=pygame.Surface((board_pixel_size,board_pixel_size),pygame.SRCALPHA)
+    def draw(self, surface, board_pixel_size, x_offset=0):
+        """Draw coils with optional x_offset"""
+        coil_pixel_size=board_pixel_size/self.size
+        coil_surface=pygame.Surface((board_pixel_size,board_pixel_size),pygame.SRCALPHA)
         for r in range(self.size):
             for c in range(self.size):
-                x=c*coil_pixel_size+coil_pixel_size/2; y=r*coil_pixel_size+coil_pixel_size/2; power=self.coil_power[r,c]; current=self.coil_current[r,c]
-                outline_color=(*DARK_GRAY[:3],100); pygame.draw.circle(coil_surface,outline_color,(int(x),int(y)),int(coil_pixel_size/2*0.8),1)
-                if power>0: alpha=int(np.clip(power*2.0,50,200)); color=(255,100,100,alpha) if current>0 else (100,100,255,alpha); radius=int(coil_pixel_size/2*0.7*(0.6+0.4*power/100)); pygame.draw.circle(coil_surface,color,(int(x),int(y)),radius)
-        surface.blit(coil_surface,(0,0))
+                x=c*coil_pixel_size+coil_pixel_size/2
+                y=r*coil_pixel_size+coil_pixel_size/2
+                power=self.coil_power[r,c]
+                current=self.coil_current[r,c]
+                outline_color=(*DARK_GRAY[:3],100)
+                pygame.draw.circle(coil_surface,outline_color,(int(x),int(y)),int(coil_pixel_size/2*0.8),1)
+                if power>0:
+                    alpha=int(np.clip(power*2.0,50,200))
+                    color=(255,100,100,alpha) if current>0 else (100,100,255,alpha)
+                    radius=int(coil_pixel_size/2*0.7*(0.6+0.4*power/100))
+                    pygame.draw.circle(coil_surface,color,(int(x),int(y)),radius)
+        surface.blit(coil_surface,(x_offset,0))
 
-    def draw_field_overlay(self, surface, board_pixel_size, resolution=20):
-        """Draw the SIMULATED magnetic field vectors"""
+    def draw_field_overlay(self, surface, board_pixel_size, resolution=20, x_offset=0):
+        """Draw the SIMULATED magnetic field vectors with optional x_offset"""
         step_size=board_pixel_size/resolution
         field_surface=pygame.Surface((board_pixel_size,board_pixel_size),pygame.SRCALPHA)
         field_magnitudes=np.linalg.norm(self.magnetic_field,axis=2)
@@ -200,27 +210,43 @@ class CoilGrid:
 
         for r_idx in range(resolution):
             for c_idx in range(resolution):
-                x_pix=c_idx*step_size+step_size/2; y_pix=r_idx*step_size+step_size/2
-                col_grid=c_idx*(self.size/resolution)+(self.size/resolution/2); row_grid=r_idx*(self.size/resolution)+(self.size/resolution/2)
-                col_int=int(col_grid); row_int=int(row_grid); dx=col_grid-col_int; dy=row_grid-row_int
+                x_pix=c_idx*step_size+step_size/2
+                y_pix=r_idx*step_size+step_size/2
+                col_grid=c_idx*(self.size/resolution)+(self.size/resolution/2)
+                row_grid=r_idx*(self.size/resolution)+(self.size/resolution/2)
+                col_int=int(col_grid)
+                row_int=int(row_grid)
+                dx=col_grid-col_int
+                dy=row_grid-row_int
 
                 if not (0<=col_int<self.size-1 and 0<=row_int<self.size-1): continue
 
-                field_00=self.magnetic_field[row_int,col_int]; field_01=self.magnetic_field[row_int,col_int+1]
-                field_10=self.magnetic_field[row_int+1,col_int]; field_11=self.magnetic_field[row_int+1,col_int+1]
-                interp_x_top=(1-dx)*field_00[0]+dx*field_01[0]; interp_x_bottom=(1-dx)*field_10[0]+dx*field_11[0]; field_x=(1-dy)*interp_x_top+dy*interp_x_bottom
-                interp_y_top=(1-dx)*field_00[1]+dx*field_01[1]; interp_y_bottom=(1-dx)*field_10[1]+dx*field_11[1]; field_y=(1-dy)*interp_y_top+dy*interp_y_bottom
-                field_vec=np.array([field_x,field_y]); field_strength=np.linalg.norm(field_vec)
+                field_00=self.magnetic_field[row_int,col_int]
+                field_01=self.magnetic_field[row_int,col_int+1]
+                field_10=self.magnetic_field[row_int+1,col_int]
+                field_11=self.magnetic_field[row_int+1,col_int+1]
+                interp_x_top=(1-dx)*field_00[0]+dx*field_01[0]
+                interp_x_bottom=(1-dx)*field_10[0]+dx*field_11[0]
+                field_x=(1-dy)*interp_x_top+dy*interp_x_bottom
+                interp_y_top=(1-dx)*field_00[1]+dx*field_01[1]
+                interp_y_bottom=(1-dx)*field_10[1]+dx*field_11[1]
+                field_y=(1-dy)*interp_y_top+dy*interp_y_bottom
+                field_vec=np.array([field_x,field_y])
+                field_strength=np.linalg.norm(field_vec)
                 min_draw_strength=0.01*max_field_strength_observed
 
                 if field_strength>min_draw_strength:
                     field_normalized=field_vec/field_strength
                     log_strength=np.log1p(field_strength/max_field_strength_observed*10)
                     max_arrow_len=step_size*0.7
-                    arrow_len=min(log_strength*max_arrow_len/np.log1p(10),max_arrow_len); arrow_len=max(2,arrow_len)
-                    end_x=x_pix+field_normalized[0]*arrow_len; end_y=y_pix+field_normalized[1]*arrow_len
-                    color_intensity=min(1.0,field_strength/max_field_strength_observed); arrow_color_rgb=(255,255*(1-color_intensity**0.5),255*(1-color_intensity**0.5))
-                    alpha=int(np.clip(100+155*color_intensity,100,255)); arrow_color=(*arrow_color_rgb,alpha)
+                    arrow_len=min(log_strength*max_arrow_len/np.log1p(10),max_arrow_len)
+                    arrow_len=max(2,arrow_len)
+                    end_x=x_pix+field_normalized[0]*arrow_len
+                    end_y=y_pix+field_normalized[1]*arrow_len
+                    color_intensity=min(1.0,field_strength/max_field_strength_observed)
+                    arrow_color_rgb=(255,255*(1-color_intensity**0.5),255*(1-color_intensity**0.5))
+                    alpha=int(np.clip(100+155*color_intensity,100,255))
+                    arrow_color=(*arrow_color_rgb,alpha)
 
                     pygame.draw.line(field_surface,arrow_color,(int(x_pix),int(y_pix)),(int(end_x),int(end_y)),1)
 
@@ -235,7 +261,7 @@ class CoilGrid:
                              pygame.draw.polygon(field_surface, arrow_color, [(int(p1[0]),int(p1[1])), (int(p2[0]), int(p2[1])), (int(p3[0]), int(p3[1]))])
                         except ValueError: pass # Ignore potential errors
 
-        surface.blit(field_surface,(0,0))
+        surface.blit(field_surface,(x_offset,0))
 
     def generate_heatmap(self, resolution=200):  # Increased resolution for better heatmap
         heatmap=np.zeros((resolution,resolution)); field_magnitudes=np.linalg.norm(self.magnetic_field,axis=2)
