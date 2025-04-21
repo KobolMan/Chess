@@ -7,146 +7,271 @@ import sys
 import time
 import heapq
 from enum import Enum
+import os # Needed for path joining potentially, and by coil_controller fix
 
 # Import from local modules
 from chess_pieces import ChessPiece, PieceColor, PieceType # Enums too
-from coil_controller import CoilGrid
+try:
+    # Assuming MAX_COIL_AMPS is defined in coil_controller (add it if not)
+    from coil_controller import CoilGrid, MAX_COIL_AMPS
+except ImportError:
+    print("Warning: MAX_COIL_AMPS not found in coil_controller. Using default.")
+    from coil_controller import CoilGrid
+    MAX_COIL_AMPS = 0.5 # Default value if not imported
+
 from pathfinding import PathFinder
 from visualization import ChessRenderer
 from hardware_interface import ElectromagnetController # Type hint
 
+# Attempt to import pygame_widgets
+try:
+    import pygame_widgets
+    from pygame_widgets.slider import Slider
+    from pygame_widgets.textbox import TextBox
+    WIDGETS_AVAILABLE = True
+except ImportError:
+    print("WARNING: pygame_widgets not found. PID sliders will be unavailable.")
+    print("Install using: pip install pygame_widgets")
+    WIDGETS_AVAILABLE = False
+    # Define dummy classes if import fails to avoid NameErrors later
+    class Slider: pass
+    class TextBox: pass
+
+# Import for heatmap fix if needed here (usually needed in coil_controller)
+from scipy.ndimage import gaussian_filter, map_coordinates
+
+
 # --- Constants ---
-DEFAULT_BOARD_SIZE_PX = 800
+# Default width/height used if screen detection fails in main.py
+DEFAULT_WINDOW_WIDTH = 1600
+DEFAULT_WINDOW_HEIGHT = 900
 BOARD_SQUARES = 8
-DEFAULT_SQUARE_SIZE_PX = DEFAULT_BOARD_SIZE_PX // BOARD_SQUARES
 COIL_GRID_SIZE = 20
-DEFAULT_HEATMAP_SIZE_PX = DEFAULT_BOARD_SIZE_PX  # Make heatmap same size as board
-DEFAULT_WINDOW_WIDTH = DEFAULT_BOARD_SIZE_PX + DEFAULT_HEATMAP_SIZE_PX + 400  # Includes heatmap on left
-DEFAULT_WINDOW_HEIGHT = DEFAULT_BOARD_SIZE_PX + 200
+SIDE_PANEL_WIDTH = 400 # Fixed width for control panel + sliders
 FPS = 60
 
 class ChessBoard:
     """
-    Orchestrates the chess simulation. PID *directly* calculates driving force.
-    Coils activated separately for visuals/hardware, avoiding stationary pieces.
+    Orchestrates the chess simulation with PID control and interactive tuning.
     """
-    def __init__(self, hardware_controller: ElectromagnetController, debug_mode=False):
+    def __init__(self, hardware_controller: ElectromagnetController,
+                 debug_mode=False, initial_window_size=None):
         self.hardware_controller = hardware_controller
-        self.debug_mode = True # Default True for tuning PID
-        # self.debug_mode = debug_mode
+        self.debug_mode = debug_mode # Use constructor arg
 
-        # Make window resizable
-        self.screen = pygame.display.set_mode((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT), pygame.RESIZABLE)
-        pygame.display.set_caption("Electromagnetic Chess Simulation (Direct PID Force)")
-        
-        # Initialize sizes - these will be updated when the window is resized
-        self.board_size_px = DEFAULT_BOARD_SIZE_PX
-        self.square_size_px = DEFAULT_SQUARE_SIZE_PX
-        self.heatmap_size_px = DEFAULT_HEATMAP_SIZE_PX
-        self.window_width = DEFAULT_WINDOW_WIDTH
-        self.window_height = DEFAULT_WINDOW_HEIGHT
-        
-        # Adjust renderer to accommodate heatmap position
-        self.board_x_offset = self.heatmap_size_px  # Board now starts after heatmap
-        self.renderer = ChessRenderer(self.board_size_px, BOARD_SQUARES, self.window_width, self.window_height, board_x_offset=self.board_x_offset)
+        # --- Window Setup ---
+        if initial_window_size:
+            self.window_width, self.window_height = initial_window_size
+            print(f"Attempting initial size: {self.window_width}x{self.window_height}")
+        else:
+            self.window_width, self.window_height = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+            print(f"Using default size: {self.window_width}x{self.window_height}")
+
+        # Create the display surface with RESIZABLE flag
+        # SCALED can sometimes cause issues with widget positioning or rendering, try without first
+        try:
+             self.screen = pygame.display.set_mode(
+                 (self.window_width, self.window_height),
+                 pygame.RESIZABLE # Start without SCALED unless needed
+             )
+        except Exception as e:
+            print(f"Error setting Pygame display mode: {e}. Exiting.")
+            sys.exit(1)
+
+        # Get final actual size after mode set
+        self.window_width, self.window_height = self.screen.get_size()
+        print(f"Final actual window size: {self.window_width}x{self.window_height}")
+
+        pygame.display.set_caption("Electromagnetic Chess Simulation (PID Tuning)")
+
+        # Initialize sizes based on actual window size
+        self._calculate_layout(self.window_width, self.window_height)
+
+        # Initialize components
+        self.renderer = ChessRenderer(
+            self.board_size_px, BOARD_SQUARES,
+            self.window_width, self.window_height,
+            board_x_offset=self.board_x_offset,
+            heatmap_size_px=self.heatmap_size_px # Pass heatmap size
+        )
         self.coil_grid = CoilGrid(size=COIL_GRID_SIZE, board_squares=BOARD_SQUARES)
         self.path_finder = PathFinder(board_size=BOARD_SQUARES)
 
-        # --- IMPROVED PID GAINS ---
-        # Reduce proportional gain to decrease oscillation
-        self.pid_kp = 120.0  # Reduced from 150.0
-        # Reduce integral gain to prevent overshooting
-        self.pid_ki = 5.0    # Reduced from 10.0
-        # Increase derivative gain for more damping
-        self.pid_kd = 120.0  # Increased from 80.0
-        # Add terminal damping for final approach to reduce oscillation
-        self.terminal_damping = 3.0 # New parameter for final approach
-        # --- END GAINS ---
+        # --- PID GAINS (Iteration 3) ---
+        self.pid_kp = 50.0
+        self.pid_ki = 5.0
+        self.pid_kd = 50.0
+        self.terminal_damping = 5.0
+        self.pid_integral_max = 40.0
+
+        # Temporary values controlled by sliders
+        self.temp_pid_kp = self.pid_kp
+        self.temp_pid_ki = self.pid_ki
+        self.temp_pid_kd = self.pid_kd
 
         self.pid_integral = np.array([0.0, 0.0])
-        self.pid_previous_error = np.array([0.0, 0.0]) # Needed if using dError/dt D term
-        self.pid_integral_max = 50.0 # Clamp I term
+        self.pid_previous_error = np.array([0.0, 0.0])
 
-        # Game State
-        self.pieces: list[ChessPiece] = []; self.captured_white: list[ChessPiece] = []; self.captured_black: list[ChessPiece] = []
-        self.selected_piece: ChessPiece | None = None; self.target_position: tuple[float, float] | None = None
-        self.move_in_progress: bool = False; self.move_complete: bool = False; self.captured_piece: ChessPiece | None = None
-        self.capture_step_index: int = 0; self.capture_path_finished: bool = False; self.temporarily_moved_pieces: list[ChessPiece] = []
+        # Game State & Simulation Params
+        self.pieces: list[ChessPiece] = []
+        self.captured_white: list[ChessPiece] = []
+        self.captured_black: list[ChessPiece] = []
+        self.selected_piece: ChessPiece | None = None
+        self.target_position: tuple[float, float] | None = None
+        self.move_in_progress: bool = False
+        self.move_complete: bool = False
+        self.last_move_pid_force_mag: float = 0.0 # Store force magnitude
+        self.current_total_sim_amps: float = 0.0 # Store sim current
 
-        # Debug Options
-        self.show_center_markers = False  # Option to show square centers
+        self.captured_piece: ChessPiece | None = None
+        self.capture_step_index: int = 0
+        self.capture_path_finished: bool = False
+        self.temporarily_moved_pieces: list[ChessPiece] = []
 
-        # Simulation Parameters
-        self.simulation_speed = 1.0; self.field_update_timer = 0.0; self.field_update_interval = 0.05
-        # Damping coefficient removed - PID's Kd handles it
+        self.simulation_speed = 1.0
+        self.field_update_timer = 0.0
+        self.field_update_interval = 0.05
 
         # Visualization Options
         self.show_coils = False
         self.show_field = False
         self.show_paths = True
-        self.show_heatmap = True  # Set to True by default as requested
-        self.renderer.show_position_dots = True  # Show position dots by default for better debugging
+        self.show_heatmap = True
+        self.show_center_markers = False
+        self.renderer.show_position_dots = True
 
-        # Move Pattern Options
-        self.current_pattern="directed"; self.patterns=["directed","knight","radial"]
+        # Move Pattern Options (for viz/hardware)
+        self.current_pattern="directed"
+        self.patterns=["directed","knight","radial"]
 
         # Offboard capture targets
-        self.capture_target_white = (BOARD_SQUARES+1.0, BOARD_SQUARES-1.5); self.capture_target_black = (BOARD_SQUARES+1.0, 0.5)
+        self.capture_target_white = (BOARD_SQUARES+1.0, BOARD_SQUARES-1.5)
+        self.capture_target_black = (BOARD_SQUARES+1.0, 0.5)
 
-        self.clock = pygame.time.Clock(); self.heatmap_surface = None; self.heatmap_needs_update = True
+        self.clock = pygame.time.Clock()
+        self.heatmap_surface = None
+        self.heatmap_needs_update = True
+
+        # --- Initialize PID Sliders ---
+        self.pid_sliders = {}
+        self.pid_textboxes = {}
+        if WIDGETS_AVAILABLE:
+            self._create_pid_sliders()
+        else:
+            print("PID Sliders disabled as pygame_widgets is not available.")
 
         self.initialize_pieces()
         print(f"ChessBoard initialized. HW Sim: {self.hardware_controller.simulation_mode}, Debug: {self.debug_mode}")
-        print(f"PID Gains (Direct Force): Kp={self.pid_kp}, Ki={self.pid_ki}, Kd={self.pid_kd}, Terminal Damping={self.terminal_damping}, Imax={self.pid_integral_max}")
-        print("COORDINATE SYSTEM: Square centers are at integer coordinates (i,j)")
+        self.print_current_pid_settings("Initial")
+
+    def print_current_pid_settings(self, context="Current"):
+        """Prints the currently active PID settings."""
+        print(f"--- {context} PID GAINS: Kp={self.pid_kp:.1f}, Ki={self.pid_ki:.1f}, Kd={self.pid_kd:.1f}, TermDamp={self.terminal_damping:.1f}, Imax={self.pid_integral_max:.1f} ---")
+
+    def _calculate_layout(self, window_width, window_height):
+        """ Recalculates layout based on current window size. """
+        self.window_width = window_width
+        self.window_height = window_height
+
+        available_width = self.window_width - SIDE_PANEL_WIDTH
+        # Keep board and heatmap square and roughly equal, leaving space for panel
+        board_size = min(
+            available_width // 2,       # Half available width
+            self.window_height - 100    # Fit vertically with margin
+        )
+        # Ensure board size is multiple of squares and has min size
+        board_size = max(BOARD_SQUARES * 20, (board_size // BOARD_SQUARES) * BOARD_SQUARES) # Min size 20px/square
+
+        self.board_size_px = board_size
+        self.heatmap_size_px = board_size # Keep them same size
+        self.square_size_px = board_size // BOARD_SQUARES
+
+        # Heatmap on left, board next to it
+        self.board_x_offset = self.heatmap_size_px
+        # Panel starts after the board
+        self.panel_x = self.board_x_offset + self.board_size_px
+
+        # print(f"Layout Recalculated: Win={window_width}x{window_height}, Board/Heatmap={board_size}px, PanelX={self.panel_x}")
+
+    def _create_pid_sliders(self):
+        """Creates the PID slider widgets."""
+        if not WIDGETS_AVAILABLE: return
+
+        # Clear previous widgets if they exist (needed for resize)
+        self.pid_sliders.clear()
+        self.pid_textboxes.clear()
+        # If pygame_widgets needs explicit cleanup, do it here (check its docs)
+
+        slider_width = SIDE_PANEL_WIDTH - 100 # Width of sliders, leave space for text
+        slider_x = self.panel_x + 30         # X position of sliders
+        slider_y_start = 450                 # Starting Y position (Adjust based on panel layout)
+        slider_spacing = 70                  # Vertical space between sliders
+
+        # Ensure slider start position is reasonable within window height
+        if slider_y_start > self.window_height - 3 * slider_spacing:
+            slider_y_start = self.window_height - 3 * slider_spacing - 20 # Adjust if too low
+
+        # --- Kp Slider ---
+        self.pid_sliders['kp'] = Slider(self.screen, slider_x, slider_y_start, slider_width, 20, min=0, max=200, step=1, initial=self.temp_pid_kp, colour=(200,200,200), handleColour=(0,150,0))
+        self.pid_textboxes['kp'] = TextBox(self.screen, slider_x + slider_width + 10, slider_y_start - 5, 50, 30, fontSize=18, borderThickness=0, colour=self.renderer.LIGHT_GRAY, textColour=self.renderer.BLACK)
+        self.pid_textboxes['kp'].disable() # Read-only display
+
+        # --- Ki Slider ---
+        self.pid_sliders['ki'] = Slider(self.screen, slider_x, slider_y_start + slider_spacing, slider_width, 20, min=0, max=50, step=0.1, initial=self.temp_pid_ki, colour=(200,200,200), handleColour=(0,0,150))
+        self.pid_textboxes['ki'] = TextBox(self.screen, slider_x + slider_width + 10, slider_y_start + slider_spacing - 5, 50, 30, fontSize=18, borderThickness=0, colour=self.renderer.LIGHT_GRAY, textColour=self.renderer.BLACK)
+        self.pid_textboxes['ki'].disable()
+
+        # --- Kd Slider ---
+        self.pid_sliders['kd'] = Slider(self.screen, slider_x, slider_y_start + 2 * slider_spacing, slider_width, 20, min=0, max=200, step=1, initial=self.temp_pid_kd, colour=(200,200,200), handleColour=(150,0,0))
+        self.pid_textboxes['kd'] = TextBox(self.screen, slider_x + slider_width + 10, slider_y_start + 2 * slider_spacing - 5, 50, 30, fontSize=18, borderThickness=0, colour=self.renderer.LIGHT_GRAY, textColour=self.renderer.BLACK)
+        self.pid_textboxes['kd'].disable()
+
+        self._update_slider_textboxes() # Set initial text
+
+    def _update_slider_textboxes(self):
+        """Updates the text boxes next to sliders with current temp values."""
+        if WIDGETS_AVAILABLE and self.pid_sliders: # Check if sliders exist
+            try:
+                # Check if slider objects actually exist before calling methods
+                if 'kp' in self.pid_sliders and self.pid_sliders['kp'] is not None:
+                     self.temp_pid_kp = self.pid_sliders['kp'].getValue()
+                     self.pid_textboxes['kp'].setText(f"{self.temp_pid_kp:.1f}")
+                if 'ki' in self.pid_sliders and self.pid_sliders['ki'] is not None:
+                     self.temp_pid_ki = self.pid_sliders['ki'].getValue()
+                     self.pid_textboxes['ki'].setText(f"{self.temp_pid_ki:.1f}")
+                if 'kd' in self.pid_sliders and self.pid_sliders['kd'] is not None:
+                     self.temp_pid_kd = self.pid_sliders['kd'].getValue()
+                     self.pid_textboxes['kd'].setText(f"{self.temp_pid_kd:.1f}")
+            except Exception as e:
+                # Reduced error spam during resize
+                # print(f"Warning: Error updating slider textboxes: {e}")
+                pass
 
     def handle_resize(self, new_width, new_height):
-        """Handle window resize events by adjusting all size-dependent variables"""
+        """Handle window resize events."""
+        if new_width <= 0 or new_height <= 0: return # Ignore invalid sizes
         print(f"Resizing window to {new_width}x{new_height}")
-        
-        # Keep minimum sizes to prevent layout issues
-        min_width = 1000  # Minimum width
-        min_height = 600  # Minimum height
-        
-        # Apply minimums
-        self.window_width = max(new_width, min_width)
-        self.window_height = max(new_height, min_height)
-        
-        # Update dimensions
-        side_panel_width = 400  # Fixed width for control panel
-        available_width = self.window_width - side_panel_width
-        
-        # Calculate board and heatmap sizes - they should be the same
-        # and take up equal parts of the available space
-        board_size = min(
-            (available_width) // 2,  # Half of available width
-            self.window_height - 100  # Leave some vertical space
-        )
-        
-        # Board should be square and a multiple of 8
-        board_size = (board_size // BOARD_SQUARES) * BOARD_SQUARES
-        
-        self.board_size_px = board_size
-        self.heatmap_size_px = board_size
-        self.square_size_px = board_size // BOARD_SQUARES
-        
-        # Update board offset
-        self.board_x_offset = self.heatmap_size_px
-        
-        # Update renderer with new dimensions
+        # Recalculate layout
+        self._calculate_layout(new_width, new_height)
+        # Recreate screen surface
+        try:
+            self.screen = pygame.display.set_mode((self.window_width, self.window_height), pygame.RESIZABLE)
+        except pygame.error as e:
+            print(f"Error resizing display: {e}")
+            # Potentially try to revert size or handle error gracefully
+            return
+        # Update renderer
         self.renderer = ChessRenderer(
-            self.board_size_px, BOARD_SQUARES, 
-            self.window_width, self.window_height, 
-            board_x_offset=self.board_x_offset
+            self.board_size_px, BOARD_SQUARES,
+            self.window_width, self.window_height,
+            board_x_offset=self.board_x_offset,
+            heatmap_size_px=self.heatmap_size_px
         )
-        
-        # Force heatmap regeneration
+        for piece in self.pieces: piece.square_size = self.square_size_px
+        # Recreate sliders AFTER renderer (uses renderer colors)
+        self._create_pid_sliders()
+        self.heatmap_surface = None
         self.heatmap_needs_update = True
-        
-        # Update pieces with new square size
-        for piece in self.pieces:
-            piece.square_size = self.square_size_px
-
 
     def initialize_pieces(self):
         """Sets up the pieces in their starting positions."""
@@ -156,168 +281,136 @@ class ChessBoard:
             (0,1):(PieceColor.BLACK,PieceType.PAWN),(1,1):(PieceColor.BLACK,PieceType.PAWN), (2,1):(PieceColor.BLACK,PieceType.PAWN),(3,1):(PieceColor.BLACK,PieceType.PAWN), (4,1):(PieceColor.BLACK,PieceType.PAWN),(5,1):(PieceColor.BLACK,PieceType.PAWN), (6,1):(PieceColor.BLACK,PieceType.PAWN),(7,1):(PieceColor.BLACK,PieceType.PAWN),
             (0,7):(PieceColor.WHITE,PieceType.ROOK),(1,7):(PieceColor.WHITE,PieceType.KNIGHT), (2,7):(PieceColor.WHITE,PieceType.BISHOP),(3,7):(PieceColor.WHITE,PieceType.QUEEN), (4,7):(PieceColor.WHITE,PieceType.KING),(5,7):(PieceColor.WHITE,PieceType.BISHOP), (6,7):(PieceColor.WHITE,PieceType.KNIGHT),(7,7):(PieceColor.WHITE,PieceType.ROOK),
             (0,6):(PieceColor.WHITE,PieceType.PAWN),(1,6):(PieceColor.WHITE,PieceType.PAWN), (2,6):(PieceColor.WHITE,PieceType.PAWN),(3,6):(PieceColor.WHITE,PieceType.PAWN), (4,6):(PieceColor.WHITE,PieceType.PAWN),(5,6):(PieceColor.WHITE,PieceType.PAWN), (6,6):(PieceColor.WHITE,PieceType.PAWN),(7,6):(PieceColor.WHITE,PieceType.PAWN), }
-        for pos, (color, ptype) in setup.items(): 
-            # Set piece position directly at integer coordinates
+        for pos, (color, ptype) in setup.items():
             self.pieces.append(ChessPiece(color, ptype, pos, board_squares=BOARD_SQUARES, square_size=self.square_size_px, coil_grid_size=COIL_GRID_SIZE))
 
     def get_piece_at_square(self, square_col_row):
-        """Finds the active piece occupying the given integer square."""
+        """Finds the active piece whose position rounds to the given integer square."""
         target_col, target_row = square_col_row
         for piece in self.pieces:
             if piece.active:
-                # The position already using integer coordinates for square centers
                 p_col_int = int(round(piece.position[0]))
                 p_row_int = int(round(piece.position[1]))
-                if p_col_int == target_col and p_row_int == target_row: 
+                if p_col_int == target_col and p_row_int == target_row:
                     return piece
         return None
 
     def is_square_occupied(self, square_col_row, ignore_piece=None):
-        """Checks if a square is occupied by an active piece."""
+        """Checks if a square is occupied by an active piece (based on rounded position)."""
         piece = self.get_piece_at_square(square_col_row); return piece is not None and piece != ignore_piece
 
     def handle_click(self, pixel_pos):
-        """Processes mouse clicks using integer square checks."""
+        """Processes mouse clicks. Target is the center of the clicked square."""
         x_pix, y_pix = pixel_pos
-        
-        # Adjust for board offset
-        x_pix -= self.board_x_offset
-        
-        if not (0 <= x_pix < self.board_size_px and 0 <= y_pix < self.board_size_px): 
-            print("Click outside board area")
-            return
-        
-        # Get the exact square that was clicked
-        clicked_col_int = x_pix // self.square_size_px
-        clicked_row_int = y_pix // self.square_size_px
-        clicked_square = (clicked_col_int, clicked_row_int)
-        
-        print(f"Clicked on square: {clicked_square}")
-        
-        if self.move_in_progress: return
-        piece_in_clicked_square = self.get_piece_at_square(clicked_square)
-        if self.selected_piece:
-            # Convert from piece position to square indices for the selected piece
-            selected_square = (int(round(self.selected_piece.position[0])), int(round(self.selected_piece.position[1])))
-            
-            if clicked_square == selected_square: 
-                print("Deselected piece.")
-                self.selected_piece = None
-                self.target_position = None
-            else:
-                target_col_int, target_row_int = clicked_square
-                piece_at_target = self.get_piece_at_square(clicked_square)
-                if piece_at_target and piece_at_target.color == self.selected_piece.color: 
-                    print(f"Switched selection to {piece_at_target.symbol}")
-                    self.selected_piece = piece_at_target
-                    self.target_position = None
+        x_pix_board = x_pix - self.board_x_offset # Click position relative to board
+
+        # Check if click is within the board area first
+        if 0 <= x_pix_board < self.board_size_px and 0 <= y_pix < self.board_size_px:
+            clicked_col_int = x_pix_board // self.square_size_px
+            clicked_row_int = y_pix // self.square_size_px
+            clicked_square = (clicked_col_int, clicked_row_int)
+            # print(f"Board Clicked on square: {clicked_square}") # Reduced spam
+            if self.move_in_progress: return
+            piece_in_clicked_square = self.get_piece_at_square(clicked_square)
+            if self.selected_piece:
+                selected_square = (int(round(self.selected_piece.position[0])), int(round(self.selected_piece.position[1])))
+                if clicked_square == selected_square:
+                    print("Deselected piece.")
+                    self.selected_piece = None; self.target_position = None
                 else:
-                    # Set target to exact integer coordinates (no +0.5 offset)
-                    self.target_position = (float(target_col_int), float(target_row_int))
-                    print(f"Target set: {self.target_position} (center of square {clicked_square})")
-                    
-                    path_is_clear = True
-                    if self.selected_piece.piece_type != PieceType.KNIGHT:
-                         if not self.is_path_clear(self.selected_piece.position, self.target_position):
-                              print("Path blocked. Attempting clearance...")
-                              if self.attempt_to_clear_path(self.selected_piece.position, self.target_position): 
-                                  print("Path cleared.")
-                              else: 
-                                  print("Clearance failed. Move cancelled.")
-                                  path_is_clear = False
-                                  self.target_position = None
-                                  
-                    if path_is_clear and self.target_position is not None:
-                         if piece_at_target:
-                             self.captured_piece = piece_at_target
-                             self.captured_piece.active = False
-                             print(f"Capturing {self.captured_piece.symbol}")
-                             capture_target_col_row = self.capture_target_white if self.captured_piece.color == PieceColor.WHITE else self.capture_target_black
-                             # For pathfinding, convert to integer grid
-                             start_rc = (target_row_int, target_col_int)
-                             target_rc = (int(capture_target_col_row[1]), int(capture_target_col_row[0]))
-                             path_nodes_rc = self.path_finder.find_capture_path(start_rc, target_rc, self.pieces, self.captured_piece)
-                             if path_nodes_rc: 
-                                 # Convert from (row, col) to (col, row) - use integer coordinates directly
-                                 self.captured_piece.capture_path = [(float(c), float(r)) for r, c in path_nodes_rc]
-                                 print(f"Generated capture path with {len(self.captured_piece.capture_path)} points.")
-                             else: 
-                                 print("Warning: Could not generate capture path!")
-                                 self.captured_piece.capture_path = []
-                             if self.captured_piece.color == PieceColor.WHITE: 
-                                 self.captured_white.append(self.captured_piece)
-                             else: 
-                                 self.captured_black.append(self.captured_piece)
-                         else: 
-                             self.captured_piece = None
-                         self.start_move() # Start the move process
-        else:
-            if piece_in_clicked_square: 
-                self.selected_piece = piece_in_clicked_square
-                self.target_position = None
-                self.captured_piece = None
-                self.temporarily_moved_pieces = []
-                print(f"Selected {self.selected_piece.symbol} at position {self.selected_piece.position}")
-            else: 
-                print("Clicked empty square.")
-                self.selected_piece = None
-                self.target_position = None
+                    target_col_int, target_row_int = clicked_square
+                    piece_at_target = self.get_piece_at_square(clicked_square)
+                    if piece_at_target and piece_at_target.color == self.selected_piece.color:
+                        print(f"Switched selection to {piece_at_target.symbol}")
+                        self.selected_piece = piece_at_target; self.target_position = None
+                    else:
+                        self.target_position = (float(target_col_int), float(target_row_int))
+                        print(f"Target set: {self.target_position} (center of square {clicked_square})")
+                        path_is_clear = True
+                        if self.selected_piece.piece_type != PieceType.KNIGHT:
+                             if not self.is_path_clear(self.selected_piece.position, self.target_position):
+                                  print("Path blocked. Attempting clearance...")
+                                  if self.attempt_to_clear_path(self.selected_piece.position, self.target_position): print("Path cleared.")
+                                  else: print("Clearance failed. Move cancelled."); path_is_clear = False; self.target_position = None
+                        if path_is_clear and self.target_position is not None:
+                             if piece_at_target: # Capture
+                                 self.captured_piece = piece_at_target; self.captured_piece.active = False
+                                 print(f"Capturing {self.captured_piece.symbol}")
+                                 capture_target_col_row = self.capture_target_white if self.captured_piece.color == PieceColor.WHITE else self.capture_target_black
+                                 start_rc = (target_row_int, target_col_int); target_rc = (int(capture_target_col_row[1]), int(capture_target_col_row[0]))
+                                 path_nodes_rc = self.path_finder.find_capture_path(start_rc, target_rc, self.pieces, self.captured_piece)
+                                 if path_nodes_rc: self.captured_piece.capture_path = [(float(c), float(r)) for r, c in path_nodes_rc]; print(f"Generated capture path with {len(self.captured_piece.capture_path)} points.")
+                                 else: print("Warning: Could not generate capture path!"); self.captured_piece.capture_path = []
+                                 if self.captured_piece.color == PieceColor.WHITE: self.captured_white.append(self.captured_piece)
+                                 else: self.captured_black.append(self.captured_piece)
+                             else: self.captured_piece = None
+                             self.start_move()
+            else: # No piece selected
+                if piece_in_clicked_square:
+                    self.selected_piece = piece_in_clicked_square; self.target_position = None; self.captured_piece = None; self.temporarily_moved_pieces = []
+                    print(f"Selected {self.selected_piece.symbol} at position {self.selected_piece.position}")
+                else: print("Clicked empty square."); self.selected_piece = None; self.target_position = None
+        # Else: Click was outside board
 
     def is_path_clear(self, start_pos_col_row, end_pos_col_row):
         """Checks for obstructions along a straight line path (uses float coords)."""
-        start_c, start_r = start_pos_col_row; end_c, end_r = end_pos_col_row; delta_c = end_c-start_c; delta_r = end_r-start_r; steps = max(abs(delta_c), abs(delta_r))
-        if steps < 1.5: return True
-        num_checks = int(steps) + 1
-        for i in range(1, num_checks):
-            t = i / num_checks; check_c = start_c + delta_c * t; check_r = start_r + delta_r * t
-            for piece in self.pieces:
-                if piece.active and piece != self.selected_piece:
-                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / self.square_size_px * 0.6)
-                    if np.sum((np.array([piece_c, piece_r]) - np.array([check_c, check_r]))**2) < collision_radius**2: return False
+        start_c, start_r = start_pos_col_row; end_c, end_r = end_pos_col_row
+        path_vec = np.array([end_c - start_c, end_r - start_r]); path_len_sq = np.sum(path_vec**2)
+        if path_len_sq < 0.01: return True
+        path_len = np.sqrt(path_len_sq); direction = path_vec / path_len
+        moving_radius = (self.selected_piece.diameter / self.square_size_px) * 0.5
+        for piece in self.pieces:
+            if piece.active and piece != self.selected_piece and piece not in self.temporarily_moved_pieces:
+                vec_to_piece = piece.position - np.array(start_pos_col_row); projection_dist = np.dot(vec_to_piece, direction)
+                if 0 < projection_dist < path_len:
+                    perp_dist_sq = max(0, np.sum(vec_to_piece**2) - projection_dist**2); other_radius = (piece.diameter / self.square_size_px) * 0.5
+                    min_dist_sq = (moving_radius + other_radius)**2 * 0.8 # Tolerance
+                    if perp_dist_sq < min_dist_sq: return False
         return True
 
     def attempt_to_clear_path(self, start_pos_col_row, end_pos_col_row):
-        """Tries to nudge one blocking piece aside."""
-        blocking_pieces = []; start_c, start_r = start_pos_col_row; end_c, end_r = end_pos_col_row; delta_c=end_c-start_c; delta_r=end_r-start_r; steps=max(abs(delta_c),abs(delta_r))
-        if steps < 1.5: return True
-        num_checks = int(steps) + 1
-        for i in range(1, num_checks):
-            t = i / num_checks; check_c = start_c + delta_c * t; check_r = start_r + delta_r * t
-            for piece in self.pieces:
-                if piece.active and piece != self.selected_piece and piece not in self.temporarily_moved_pieces:
-                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / self.square_size_px * 0.6)
-                    if np.sum((np.array([piece_c,piece_r])-np.array([check_c,check_r]))**2) < collision_radius**2 and piece not in blocking_pieces: blocking_pieces.append(piece)
+        """Tries to nudge one blocking piece aside to an adjacent empty square."""
+        blocking_pieces = []; start_c, start_r = start_pos_col_row; end_c, end_r = end_pos_col_row
+        path_vec = np.array([end_c - start_c, end_r - start_r]); path_len_sq = np.sum(path_vec**2)
+        if path_len_sq < 0.01: return True
+        path_len = np.sqrt(path_len_sq); direction = path_vec / path_len; moving_radius = (self.selected_piece.diameter / self.square_size_px) * 0.5
+        for piece in self.pieces:
+            if piece.active and piece != self.selected_piece and piece not in self.temporarily_moved_pieces:
+                vec_to_piece = piece.position - np.array(start_pos_col_row); projection_dist = np.dot(vec_to_piece, direction)
+                if 0 < projection_dist < path_len:
+                    perp_dist_sq = max(0, np.sum(vec_to_piece**2) - projection_dist**2); other_radius = (piece.diameter / self.square_size_px) * 0.5
+                    min_dist_sq = (moving_radius + other_radius)**2 * 0.8
+                    if perp_dist_sq < min_dist_sq: blocking_pieces.append(piece)
         if not blocking_pieces: return True
         piece_to_move = next((p for p in blocking_pieces if p.piece_type == PieceType.PAWN), blocking_pieces[0])
-        path_vec = np.array([delta_c, delta_r]); path_len = np.linalg.norm(path_vec);
-        if path_len == 0: return True
-        perp_vec = np.array([-delta_r / path_len, delta_c / path_len])
-        move_distance = 0.6; original_pos = piece_to_move.position.copy()
-        for move_dir in [perp_vec * move_distance, perp_vec * -move_distance]:
-            temp_target_pos = original_pos + move_dir; 
-            # Convert to square indices
-            target_square = (int(round(temp_target_pos[0])), int(round(temp_target_pos[1])))
-            if 0<=target_square[0]<BOARD_SQUARES and 0<=target_square[1]<BOARD_SQUARES:
-                 if not self.is_square_occupied(target_square, ignore_piece=piece_to_move):
-                    print(f"Temporarily moving {piece_to_move.symbol} aside."); piece_to_move.position_before_temp_move = original_pos
-                    # Set to target square using integer coordinates
-                    piece_to_move.position = np.array([target_square[0], target_square[1]])
-                    piece_to_move.velocity *= 0.1; piece_to_move.path = [piece_to_move.position.copy()]
-                    self.temporarily_moved_pieces.append(piece_to_move); return True
-        print(f"Could not find clear spot for {piece_to_move.symbol}."); return False
+        print(f"Attempting to move blocking piece: {piece_to_move.symbol}")
+        original_pos = piece_to_move.position.copy(); original_square_int = (int(round(original_pos[0])), int(round(original_pos[1])))
+        possible_nudges = [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]
+        for dc, dr in possible_nudges:
+            target_col_int = original_square_int[0] + dc; target_row_int = original_square_int[1] + dr
+            target_square_int = (target_col_int, target_row_int)
+            if 0 <= target_col_int < BOARD_SQUARES and 0 <= target_row_int < BOARD_SQUARES:
+                if not self.is_square_occupied(target_square_int, ignore_piece=piece_to_move):
+                    print(f"Temporarily moving {piece_to_move.symbol} from {original_square_int} to {target_square_int}.")
+                    piece_to_move.position_before_temp_move = original_pos
+                    piece_to_move.position = np.array([float(target_col_int), float(target_row_int)])
+                    piece_to_move.velocity = np.array([0.0, 0.0]); piece_to_move.path = [piece_to_move.position.copy()]
+                    self.temporarily_moved_pieces.append(piece_to_move)
+                    return self.is_path_clear(start_pos_col_row, end_pos_col_row)
+        print(f"Could not find a clear adjacent square for {piece_to_move.symbol}."); return False
 
     def start_move(self):
         """Initiates the move sequence and resets PID controller state."""
         if self.selected_piece and self.target_position:
-            self.move_in_progress = True; self.move_complete = False; self.capture_step_index = 0
-            self.capture_path_finished = (self.captured_piece is None or not self.captured_piece.capture_path)
-            self.coil_grid.reset(); self.heatmap_needs_update = True
-            self.pid_integral.fill(0.0); self.pid_previous_error.fill(0.0) # Reset PID
+            print(f"Starting move for {self.selected_piece.symbol} to {self.target_position}")
+            self.move_in_progress = True; self.move_complete = False; self.last_move_pid_force_mag = 0.0
+            self.capture_step_index = 0; self.capture_path_finished = (self.captured_piece is None or not self.captured_piece.capture_path)
+            self.pid_integral.fill(0.0); self.pid_previous_error.fill(0.0)
+            self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update = True
 
     def _create_keep_out_mask(self):
-        """Identifies coils too close to stationary pieces."""
-        blocked_coils = set()
-        keep_out_radius_coils = 2.0; keep_out_radius_sq = keep_out_radius_coils**2
+        """Identifies coils too close to stationary pieces (for viz/hardware)."""
+        blocked_coils = set(); keep_out_radius_coils = 1.5; keep_out_radius_sq = keep_out_radius_coils**2
         pieces_to_avoid = [p for p in self.pieces if p.active and p != self.selected_piece and p not in self.temporarily_moved_pieces]
         if self.captured_piece and not self.capture_path_finished: pieces_to_avoid.append(self.captured_piece)
         for piece in pieces_to_avoid:
@@ -326,211 +419,230 @@ class ChessBoard:
             min_c = max(0, int(math.floor(piece_coil_c - keep_out_radius_coils))); max_c = min(COIL_GRID_SIZE, int(math.ceil(piece_coil_c + keep_out_radius_coils)))
             for r in range(min_r, max_r):
                 for c in range(min_c, max_c):
-                    if (r-piece_coil_r)**2 + (c-piece_coil_c)**2 < keep_out_radius_sq: blocked_coils.add((r, c))
+                    if (r - piece_coil_r)**2 + (c - piece_coil_c)**2 < keep_out_radius_sq: blocked_coils.add((r, c))
         return blocked_coils
-    
+
     def update_move(self, dt):
-        """Updates piece physics using direct PID force. Coils avoid other pieces."""
-        if not self.move_in_progress: return
-    
+        """Updates piece physics using direct PID force with dynamic gain scaling."""
+        if not self.move_in_progress:
+             self.last_move_pid_force_mag = 0.0; self.current_total_sim_amps = self.coil_grid.calculate_total_current()
+             return
         effective_dt = dt * self.simulation_speed
         if effective_dt <= 0: return
-    
         if self.selected_piece and self.target_position:
-            current_pos = self.selected_piece.position.copy()
-            current_vel = self.selected_piece.velocity.copy()
-            target_pos = np.array(self.target_position)
-    
-            # --- PID Control Calculation ---
-            error = target_pos - current_pos
+            current_pos = self.selected_piece.position.copy(); current_vel = self.selected_piece.velocity.copy()
+            target_pos = np.array(self.target_position); error = target_pos - current_pos
             distance_to_target = np.linalg.norm(error)
-            
-            # Calculate distance-based scaling factor for D term
-            distance_factor = min(1.0, distance_to_target/0.5)  # Scale from 0-1 based on distance
-            effective_kd = self.pid_kd * distance_factor
-            
-            p_term = self.pid_kp * error
-            
-            # Accumulate integral error
-            if self.pid_ki > 1e-6:
-                self.pid_integral += error * effective_dt
-                integral_mag = np.linalg.norm(self.pid_integral)
+            # Dynamic Gain Scaling
+            gain_scale_distance = 1.5; min_gain_scale = 0.35
+            scale_factor = np.clip(distance_to_target / gain_scale_distance, min_gain_scale, 1.0)
+            effective_kp = self.pid_kp * scale_factor; effective_kd = self.pid_kd * scale_factor; effective_ki = self.pid_ki
+            # PID Terms
+            p_term = effective_kp * error
+            if effective_ki > 1e-6:
+                self.pid_integral += error * effective_dt; integral_mag = np.linalg.norm(self.pid_integral)
                 if integral_mag > self.pid_integral_max: self.pid_integral = self.pid_integral * (self.pid_integral_max / integral_mag)
-                i_term = self.pid_ki * self.pid_integral
-            else:
-                i_term = np.array([0.0, 0.0])
-                
-            # Apply scaled D term - default damping
+                i_term = effective_ki * self.pid_integral
+            else: i_term = np.array([0.0, 0.0])
             d_term = -effective_kd * current_vel
-            
-            # IMPROVEMENT: Add terminal damping when close to target
-            # This increases the damping force when very close to target to prevent oscillation
-            terminal_zone = 0.3
+            terminal_zone = 0.4
             if distance_to_target < terminal_zone:
-                # Scale up additional damping as we get closer
                 terminal_factor = 1.0 - (distance_to_target / terminal_zone)
                 terminal_damping_force = -self.terminal_damping * current_vel * terminal_factor
-                d_term = d_term + terminal_damping_force
-                
-            pid_force = p_term + i_term + d_term # Total desired force
+                d_term += terminal_damping_force
+            # Total PID Force
+            pid_force = p_term + i_term + d_term; self.last_move_pid_force_mag = np.linalg.norm(pid_force)
             max_pid_force = 5000.0
-            pid_force_mag = np.linalg.norm(pid_force)
-            if pid_force_mag > max_pid_force: pid_force = pid_force * (max_pid_force / pid_force_mag)
-    
-            if self.debug_mode: 
-                print(f"\n--- Update Step dt={effective_dt:.4f} ---")
-                print(f"  Piece: {self.selected_piece.symbol} Pos:({current_pos[0]:.2f},{current_pos[1]:.2f}) Vel:({current_vel[0]:.2f},{current_vel[1]:.2f}) Dist:{distance_to_target:.2f}")
-                print(f"  Target: ({target_pos[0]:.2f}, {target_pos[1]:.2f}) - Square: ({int(target_pos[0])},{int(target_pos[1])})")
-                print(f"  PID Error: ({error[0]:.2f},{error[1]:.2f})")
-                print(f"  PID Terms: P:({p_term[0]:.1f},{p_term[1]:.1f}) I:({i_term[0]:.1f},{i_term[1]:.1f}) D:({d_term[0]:.1f},{d_term[1]:.1f})")
-                print(f"  PID Force: ({pid_force[0]:.2f},{pid_force[1]:.2f})")
-    
-            # IMPROVED STOP CONDITION: Check position, velocity and acceleration trends
-            if distance_to_target < 0.01:
-                self.selected_piece.position = target_pos.copy()
-                self.selected_piece.velocity.fill(0.0)
-                move_finished = True
-            else:
-                # More sensitive stop conditions with velocity check
-                stop_threshold = 0.03  # Position threshold
-                velocity_threshold = 0.05  # Stricter velocity threshold
-                
-                # Check if we're close enough to target with slow enough velocity
-                move_finished = (distance_to_target < stop_threshold and np.linalg.norm(current_vel) < velocity_threshold)
-    
+            if self.last_move_pid_force_mag > max_pid_force:
+                pid_force = pid_force * (max_pid_force / self.last_move_pid_force_mag); self.last_move_pid_force_mag = max_pid_force
+                if self.debug_mode: print("  PID Force Clamped!")
+            # Debug Output
+            if self.debug_mode:
+                print(f"\n--- Update Step dt={effective_dt:.4f} ---"); print(f"  Piece: {self.selected_piece.symbol} Pos:({current_pos[0]:.2f},{current_pos[1]:.2f}) Vel:({current_vel[0]:.2f},{current_vel[1]:.2f}) Dist:{distance_to_target:.3f}")
+                print(f"  Target: ({target_pos[0]:.2f}, {target_pos[1]:.2f})"); print(f"  PID Error: ({error[0]:.3f},{error[1]:.3f})"); print(f"  Gain Scale Factor: {scale_factor:.2f} (Min: {min_gain_scale})")
+                print(f"  PID Terms: P:({p_term[0]:.1f},{p_term[1]:.1f}) I:({i_term[0]:.1f},{i_term[1]:.1f}) D:({d_term[0]:.1f},{d_term[1]:.1f})"); print(f"  PID Force: ({pid_force[0]:.2f},{pid_force[1]:.2f}) Mag: {self.last_move_pid_force_mag:.2f}")
+            # Stop Condition
+            stop_threshold = 0.02; velocity_threshold = 0.03; force_threshold = 0.1
+            settled_condition = (self.last_move_pid_force_mag < force_threshold and np.linalg.norm(current_vel) < velocity_threshold * 2)
+            move_finished = (distance_to_target < stop_threshold and np.linalg.norm(current_vel) < velocity_threshold) or \
+                            (distance_to_target < stop_threshold * 2 and settled_condition)
             if move_finished:
-                final_pos_before_snap=self.selected_piece.position.copy(); final_vel_before_snap=self.selected_piece.velocity.copy()
-                self.selected_piece.position=target_pos; self.selected_piece.velocity.fill(0.0)
-                if self.debug_mode: print(f"Move complete. Snapped from ({final_pos_before_snap[0]:.3f},{final_pos_before_snap[1]:.3f}) Vel ({final_vel_before_snap[0]:.3f},{final_vel_before_snap[1]:.3f})"); print(f"Final Snapped Position: ({self.selected_piece.position[0]},{self.selected_piece.position[1]}) Velocity: ({self.selected_piece.velocity[0]},{self.selected_piece.velocity[1]})")
-                else: print("Move complete.")
-                self.move_in_progress=False; self.move_complete=True; self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update=True
+                final_pos_before_snap = self.selected_piece.position.copy(); final_vel_before_snap = self.selected_piece.velocity.copy()
+                self.selected_piece.position = target_pos.copy(); self.selected_piece.velocity.fill(0.0); self.pid_integral.fill(0.0)
+                if self.debug_mode: print(f"STOP Condition Met: Dist {distance_to_target:.3f} (<{stop_threshold}), Vel {np.linalg.norm(current_vel):.3f} (<{velocity_threshold}), Force {self.last_move_pid_force_mag:.2f} (<{force_threshold})")
+                print(f"Move complete. Snapped from ({final_pos_before_snap[0]:.3f},{final_pos_before_snap[1]:.3f}) Vel ({final_vel_before_snap[0]:.3f},{final_vel_before_snap[1]:.3f})"); print(f"Final Position: ({self.selected_piece.position[0]},{self.selected_piece.position[1]}) Velocity: ({self.selected_piece.velocity[0]},{self.selected_piece.velocity[1]})")
+                self.move_in_progress = False; self.move_complete = True; self.target_position = None; self.last_move_pid_force_mag = 0.0
+                self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update = True; self.current_total_sim_amps = 0.0
                 for piece in self.temporarily_moved_pieces: piece.return_from_temporary_move()
-                self.temporarily_moved_pieces=[]; self.target_position=None
-            else:
-                # --- Move In Progress ---
-                # --- Coil Simulation & Hardware Update (For Visuals/Hardware ONLY) ---
+                self.temporarily_moved_pieces = []
+            else: # Move In Progress
+                self.selected_piece.apply_force(pid_force, effective_dt)
+                if self.debug_mode: print(f"  End Pos:({self.selected_piece.position[0]:.2f},{self.selected_piece.position[1]:.2f}) End Vel:({self.selected_piece.velocity[0]:.2f},{self.selected_piece.velocity[1]:.2f})")
+                # Update Coil Simulation & Hardware
                 self.field_update_timer += effective_dt
                 if self.field_update_timer >= self.field_update_interval:
-                    self.field_update_timer = 0
-                    blocked_coils_set = self._create_keep_out_mask() # Use mask
-                    current_coil_pos = self.selected_piece.get_coil_position()
-                    nominal_target_coil = np.array(target_pos) * (COIL_GRID_SIZE / BOARD_SQUARES) # Use NOMINAL target
-                    dx_board=target_pos[0]-current_pos[0]; dy_board=target_pos[1]-current_pos[1]
-                    is_knight_shape=(abs(round(dx_board))==1 and abs(round(dy_board))==2)or(abs(round(dx_board))==2 and abs(round(dy_board))==1)
-                    chosen_pattern=self.current_pattern; straight_threshold=0.1
-                    if self.selected_piece.piece_type==PieceType.KNIGHT:
-                        if is_knight_shape and self.current_pattern in["knight","directed"]: chosen_pattern="knight"
-                    elif abs(dx_board)<straight_threshold and abs(dy_board)>straight_threshold: chosen_pattern="straight_vertical"
-                    elif abs(dy_board)<straight_threshold and abs(dx_board)>straight_threshold: chosen_pattern="straight_horizontal"
-                    elif abs(abs(dx_board)-abs(dy_board))<straight_threshold*2 and abs(dx_board)>straight_threshold: chosen_pattern="directed"
+                    self.field_update_timer = 0; blocked_coils_set = self._create_keep_out_mask(); current_coil_pos = self.selected_piece.get_coil_position(); target_coil_pos = tuple(np.array(target_pos) * (COIL_GRID_SIZE / BOARD_SQUARES))
+                    dx_board = target_pos[0] - current_pos[0]; dy_board = target_pos[1] - current_pos[1]
+                    is_knight_shape = (abs(round(dx_board)) == 1 and abs(round(dy_board)) == 2) or (abs(round(dx_board)) == 2 and abs(round(dy_board)) == 1)
+                    chosen_pattern = self.current_pattern; straight_threshold = 0.1
+                    if self.selected_piece.piece_type == PieceType.KNIGHT:
+                         if is_knight_shape and self.current_pattern in ["knight", "directed"]: chosen_pattern = "knight"
+                    elif abs(dx_board) < straight_threshold and abs(dy_board) > straight_threshold: chosen_pattern = "straight_vertical"
+                    elif abs(dy_board) < straight_threshold and abs(dx_board) > straight_threshold: chosen_pattern = "straight_horizontal"
                     else: chosen_pattern="directed"
-                    scale_factor = 1.0; scale_distance_threshold = 1.2
-                    if distance_to_target < scale_distance_threshold: min_scale=0.05; ratio=distance_to_target/scale_distance_threshold; scale_factor=min_scale+(1.0-min_scale)*(ratio**3); scale_factor=max(min_scale,scale_factor)
-                    current_intensity = 100 * scale_factor
-                    # Activate coils with mask
-                    self.coil_grid.activate_coil_pattern(chosen_pattern,current_coil_pos,tuple(nominal_target_coil),intensity=current_intensity,radius=5,blocked_coils=blocked_coils_set)
-                    self.coil_grid.update_magnetic_field(); self.heatmap_needs_update=True
+                    scale_distance_threshold = 1.2; min_viz_scale = 0.1
+                    if distance_to_target < scale_distance_threshold: ratio = distance_to_target / scale_distance_threshold; viz_scale_factor = min_viz_scale + (1.0 - min_viz_scale) * (ratio**2); viz_scale_factor = max(min_viz_scale, viz_scale_factor)
+                    else: viz_scale_factor = 1.0
+                    current_intensity = 100 * viz_scale_factor
+                    self.coil_grid.activate_coil_pattern(pattern_type=chosen_pattern, position=current_coil_pos, target=target_coil_pos, intensity=current_intensity, radius=4, blocked_coils=blocked_coils_set)
+                    self.current_total_sim_amps = self.coil_grid.calculate_total_current(); self.coil_grid.update_magnetic_field(); self.heatmap_needs_update = True
                     self.hardware_controller.apply_state(self.coil_grid.coil_power, self.coil_grid.coil_current)
-    
-                # --- Force Application (Using DIRECT PID Force) ---
-                # Apply PID force directly to the piece physics
-                # apply_force no longer handles damping internally
-                self.selected_piece.apply_force(pid_force, effective_dt)
-    
-                if self.debug_mode: print(f"  End Pos:({self.selected_piece.position[0]:.2f},{self.selected_piece.position[1]:.2f}) End Vel:({self.selected_piece.velocity[0]:.2f},{self.selected_piece.velocity[1]:.2f})")
-    
-        # --- Update Captured Piece ---
+        # Update Captured Piece Movement
         if self.captured_piece and not self.capture_path_finished:
             node_reached_or_finished = self.captured_piece.follow_capture_path(self.capture_step_index)
             if node_reached_or_finished:
-                if self.capture_step_index<len(self.captured_piece.capture_path)-1: self.capture_step_index+=1
-                else: self.capture_path_finished=True; print(f"Capture movement finished for {self.captured_piece.symbol}.")
+                if self.capture_step_index < len(self.captured_piece.capture_path) - 1: self.capture_step_index += 1
+                else: self.capture_path_finished = True; print(f"Capture movement finished for {self.captured_piece.symbol}.")
 
     def reset(self):
-        print("Resetting board..."); self.initialize_pieces(); self.selected_piece=None; self.target_position=None; self.move_in_progress=False; self.move_complete=False; self.captured_piece=None; self.capture_step_index=0; self.capture_path_finished=False; self.temporarily_moved_pieces=[]; self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update=True; self.pid_integral.fill(0.0); self.pid_previous_error.fill(0.0); print("Board reset complete.")
+        """Resets the board, pieces, PID state (applies slider values), and hardware."""
+        print("Resetting board...");
+        if WIDGETS_AVAILABLE:
+            self._update_slider_textboxes() # Get latest slider values before applying
+            print(f"Applying PID values from sliders: Kp={self.temp_pid_kp:.1f}, Ki={self.temp_pid_ki:.1f}, Kd={self.temp_pid_kd:.1f}")
+            self.pid_kp = self.temp_pid_kp; self.pid_ki = self.temp_pid_ki; self.pid_kd = self.temp_pid_kd
+        else: print("Widgets not available, using default PID gains.")
+        self.print_current_pid_settings("Active after Reset")
+        self.initialize_pieces(); self.selected_piece = None; self.target_position = None
+        self.move_in_progress = False; self.move_complete = False; self.last_move_pid_force_mag = 0.0; self.current_total_sim_amps = 0.0
+        self.captured_piece = None; self.capture_step_index = 0; self.capture_path_finished = False; self.temporarily_moved_pieces = []
+        self.pid_integral.fill(0.0); self.pid_previous_error.fill(0.0)
+        self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update = True
+        print("Board reset complete.")
 
     def cycle_pattern(self):
-        current_index=self.patterns.index(self.current_pattern); next_index=(current_index+1)%len(self.patterns); self.current_pattern=self.patterns[next_index]; print(f"Switched to pattern: {self.current_pattern}")
+        """Cycles through available coil patterns (for viz/hardware)."""
+        current_index = self.patterns.index(self.current_pattern); next_index = (current_index + 1) % len(self.patterns)
+        self.current_pattern = self.patterns[next_index]; print(f"Switched to pattern: {self.current_pattern}")
 
     def load_heatmap(self):
+        """Generates and loads the heatmap image if needed."""
         if self.heatmap_needs_update or self.heatmap_surface is None:
-            heatmap_path=self.coil_grid.plot_heatmap(filename="field_heatmap.png")
+            heatmap_path = self.coil_grid.plot_heatmap(filename="field_heatmap.png")
             if heatmap_path:
-                try: loaded_surface=pygame.image.load(heatmap_path).convert(); self.heatmap_surface=loaded_surface; self.heatmap_needs_update=False
-                except Exception as e: print(f"Error loading heatmap image '{heatmap_path}': {e}"); self.heatmap_surface=None
-            else: print("Heatmap generation failed."); self.heatmap_surface=None
+                try:
+                    # Check if file exists before loading
+                    if not os.path.exists(heatmap_path):
+                         print(f"Error: Heatmap file not found after generation: {heatmap_path}")
+                         self.heatmap_surface = None; return
+                    loaded_surface = pygame.image.load(heatmap_path)
+                    if loaded_surface.get_alpha() is None: loaded_surface = loaded_surface.convert()
+                    else: loaded_surface = loaded_surface.convert_alpha()
+                    target_w = self.heatmap_size_px; target_h = self.heatmap_size_px
+                    self.heatmap_surface = pygame.transform.smoothscale(loaded_surface, (target_w, target_h))
+                    self.heatmap_needs_update = False
+                except pygame.error as e:
+                     print(f"Error loading Pygame heatmap image '{heatmap_path}': {e}")
+                     self.heatmap_surface = None
+                except Exception as e:
+                     print(f"Error loading/scaling heatmap image '{heatmap_path}': {e}");
+                     self.heatmap_surface = None
+            else:
+                 # Prevent repeated generation attempts if failed first time
+                 # print("Heatmap generation failed.") # Reduced spam
+                 self.heatmap_surface = None # Ensure it's None if generation fails
+                 self.heatmap_needs_update = False # Avoid retrying every frame
 
     def run(self):
+        """Main simulation loop."""
         running = True
         while running:
             dt_sec = min(self.clock.tick(FPS) / 1000.0, 0.1)
-            for event in pygame.event.get():
+            events = pygame.event.get()
+
+            # --- Update Widgets First ---
+            if WIDGETS_AVAILABLE:
+                # Update widget states based on events
+                # This call processes events for the widgets
+                pygame_widgets.update(events)
+                # Update internal temp values and textbox displays AFTER processing events
+                self._update_slider_textboxes()
+
+            # --- Handle Game Events ---
+            for event in events:
                 if event.type == pygame.QUIT: running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    if event.button == 1: self.handle_click(event.pos)
+                    # Check if the click was handled by a widget; if not, process board click
+                    # Note: pygame_widgets doesn't easily provide a 'handled' flag.
+                    # We rely on checking coordinates in handle_click.
+                    if event.button == 1:
+                         self.handle_click(event.pos)
                 elif event.type == pygame.KEYDOWN:
                     key = event.key
                     if key == pygame.K_r: self.reset()
+                    elif key == pygame.K_m: self.cycle_pattern()
+                    elif key == pygame.K_PLUS or key == pygame.K_EQUALS: self.simulation_speed = min(5.0, self.simulation_speed + 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
+                    elif key == pygame.K_MINUS: self.simulation_speed = max(0.1, self.simulation_speed - 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
                     elif key == pygame.K_c: self.show_coils = not self.show_coils
                     elif key == pygame.K_f: self.show_field = not self.show_field
                     elif key == pygame.K_p: self.show_paths = not self.show_paths
-                    elif key == pygame.K_h: self.show_heatmap = not self.show_heatmap; self.heatmap_needs_update = True
-                    elif key == pygame.K_m: self.cycle_pattern()
-                    elif key == pygame.K_PLUS or key == pygame.K_EQUALS: self.simulation_speed = min(10.0, self.simulation_speed + 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
-                    elif key == pygame.K_MINUS: self.simulation_speed = max(0.1, self.simulation_speed - 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
+                    elif key == pygame.K_h: self.show_heatmap = not self.show_heatmap; self.heatmap_needs_update = True # Force regen on toggle
                     elif key == pygame.K_d: self.debug_mode = not self.debug_mode; print(f"Debug mode: {self.debug_mode}")
                     elif key == pygame.K_x: self.show_center_markers = not self.show_center_markers; print(f"Center markers: {self.show_center_markers}")
                     elif key == pygame.K_y: self.renderer.show_position_dots = not self.renderer.show_position_dots; print(f"Position dots: {self.renderer.show_position_dots}")
                     elif key == pygame.K_ESCAPE: running = False
-                elif event.type == pygame.VIDEORESIZE:
-                    # Handle window resize event
-                    self.handle_resize(event.w, event.h)
-                    
+                elif event.type == pygame.VIDEORESIZE: self.handle_resize(event.w, event.h)
+
+            # --- Update Simulation Logic ---
             self.update_move(dt_sec)
-            
-            # Clear screen
+
+            # --- Drawing ---
             self.screen.fill(self.renderer.DARK_GRAY)
-            
-            # Draw heatmap on the left side
-            if self.show_heatmap: 
-                self.load_heatmap()
-                self.renderer.draw_heatmap_beside_board(self.screen, self.heatmap_surface if self.show_heatmap else None)
-            
-            # Draw board with offset
+            # Heatmap
+            if self.show_heatmap: self.load_heatmap(); self.renderer.draw_heatmap_beside_board(self.screen, self.heatmap_surface)
+            else: self.renderer.draw_heatmap_beside_board(self.screen, None)
+            # Board
             self.renderer.draw_board(self.screen)
-            
-            # Draw center markers if enabled
+            # Optional Center Markers
             if self.show_center_markers:
                 for row in range(BOARD_SQUARES):
                     for col in range(BOARD_SQUARES):
-                        # Draw markers at integer coordinates for square centers
-                        pixel_x = int(col * self.square_size_px + self.square_size_px // 2) + self.board_x_offset
-                        pixel_y = int(row * self.square_size_px + self.square_size_px // 2)
-                        self.renderer.draw_center_marker(self.screen, pixel_x, pixel_y)
-            
+                        px, py = self.renderer.board_to_pixel((col, row))
+                        self.renderer.draw_center_marker(self.screen, px, py)
+            # Optional Coil/Field Viz
             if self.show_coils: self.coil_grid.draw(self.screen, self.board_size_px, x_offset=self.board_x_offset)
             if self.show_field: self.coil_grid.draw_field_overlay(self.screen, self.board_size_px, x_offset=self.board_x_offset)
-            
-            self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece)
+            # Paths
             if self.show_paths: self.renderer.draw_paths(self.screen, self.pieces, self.selected_piece)
-            
+            # Pieces
+            self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece)
+            # Control Panel & Capture Area
             info_dict = {
-                'selected_piece': self.selected_piece,
-                'target_position': self.target_position,
-                'move_in_progress': self.move_in_progress,
-                'move_complete': self.move_complete,
-                'show_coils': self.show_coils,
-                'show_field': self.show_field,
-                'show_paths': self.show_paths,
-                'show_heatmap': self.show_heatmap,
-                'show_center_markers': self.show_center_markers,
-                'current_pattern': self.current_pattern,
-                'simulation_speed': self.simulation_speed,
+                'selected_piece': self.selected_piece, 'target_position': self.target_position if self.move_in_progress else None,
+                'move_in_progress': self.move_in_progress, 'move_complete': self.move_complete,
+                'show_coils': self.show_coils, 'show_field': self.show_field, 'show_paths': self.show_paths,
+                'show_heatmap': self.show_heatmap, 'show_center_markers': self.show_center_markers,
+                'current_pattern': self.current_pattern, 'simulation_speed': self.simulation_speed,
+                'debug_mode': self.debug_mode, 'pid_gains_active': (self.pid_kp, self.pid_ki, self.pid_kd),
+                'pid_gains_temp': (self.temp_pid_kp, self.temp_pid_ki, self.temp_pid_kd), # Pass temp values too
+                'pid_force_mag': self.last_move_pid_force_mag, 'sim_current_amps': self.current_total_sim_amps,
+                'captured_white': self.captured_white, 'captured_black': self.captured_black,
             }
-            
-            panel_x = self.board_x_offset + self.board_size_px
-            self.renderer.draw_controls(self.screen, info_dict, panel_x=panel_x)
-            self.renderer.draw_capture_area(self.screen, self.captured_white, self.captured_black, panel_x=panel_x)
-            
-            pygame.display.flip()
+            # Draw panel background and text info FIRST
+            self.renderer.draw_controls(self.screen, info_dict, panel_x=self.panel_x, sliders_active=WIDGETS_AVAILABLE)
+
+            # --- Explicitly Draw Widgets (Needed!) ---
+            # Widgets need to be drawn after their background surface is drawn.
+            # pygame_widgets.update handles events, but drawing is often separate.
+            # This should make the sliders appear on top of the panel background.
+            if WIDGETS_AVAILABLE:
+                 # Manually redraw widgets on the main screen surface each frame
+                 # This assumes widgets were created with self.screen
+                 for slider in self.pid_sliders.values(): slider.draw()
+                 for textbox in self.pid_textboxes.values(): textbox.draw()
+
+
+            pygame.display.flip() # Update screen
+            if self.move_complete: self.move_complete = False # Reset flag
+
         print("Simulation loop ended.")

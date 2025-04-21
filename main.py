@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 # Smart Electromagnetic Chess - Main Script
 
-print("DEBUG: Starting main.py script...") # <<< DEBUG PRINT 1
+print("DEBUG: Starting main.py script...")
 
 import sys
 import argparse
 import pygame # Keep pygame import if needed for quit/exceptions
+import os
 
-print("DEBUG: Basic imports done.") # <<< DEBUG PRINT 2
+print("DEBUG: Basic imports done.")
 
 # Import the necessary classes from your modules
-# Errors during these imports might cause silent exit
 try:
-    from chess_simulation import ChessBoard, COIL_GRID_SIZE # Import the main simulation class
-    print("DEBUG: Imported ChessBoard.") # <<< DEBUG PRINT 3
+    # Import constants needed here (or define defaults)
+    from chess_simulation import ChessBoard, COIL_GRID_SIZE, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+    print("DEBUG: Imported ChessBoard and constants.")
     from hardware_interface import ElectromagnetController
-    print("DEBUG: Imported ElectromagnetController.") # <<< DEBUG PRINT 4 (We know this one works)
+    print("DEBUG: Imported ElectromagnetController.")
+    # Ensure SERIAL_AVAILABLE is accessible if needed for initial sim_mode check
+    from hardware_interface import SERIAL_AVAILABLE as HW_SERIAL_AVAILABLE
 except ImportError as e:
     print(f"FATAL: Failed to import required module: {e}")
+    # Attempt to provide more specific feedback
+    if "chess_simulation" in str(e):
+        print("-> Please ensure 'chess_simulation.py' is in the same directory.")
+    elif "hardware_interface" in str(e):
+         print("-> Please ensure 'hardware_interface.py' is in the same directory.")
+    # Add similar checks for other imports if needed
     sys.exit(1)
 except Exception as e:
     print(f"FATAL: Unexpected error during import: {e}")
@@ -28,70 +37,88 @@ except Exception as e:
 
 def main():
     """Main entry point for the smart chess system"""
-    print("DEBUG: Entered main() function.") # <<< DEBUG PRINT 5
+    print("DEBUG: Entered main() function.")
     parser = argparse.ArgumentParser(description='Smart Electromagnetic Chess System')
     parser.add_argument('--hardware', action='store_true', help='Enable hardware control')
     parser.add_argument('--port', type=str, default='/dev/ttyUSB0', help='Serial port for hardware control')
     parser.add_argument('--baud', type=int, default=115200, help='Serial baud rate')
     parser.add_argument('--rtscts', action='store_true', help='Enable RTS/CTS hardware flow control (if supported)')
     parser.add_argument('--dirpin', type=int, default=None, help='BCM GPIO pin for RS485 direction')
-    parser.add_argument('--debug', action='store_true', help='Enable extra debug output')
+    parser.add_argument('--debug', action='store_true', help='Enable extra debug output (console)')
+    parser.add_argument('--no-debug-start', action='store_true', help='Start with debug output OFF')
 
-    print("DEBUG: Parsing arguments...") # <<< DEBUG PRINT 6
+
+    print("DEBUG: Parsing arguments...")
     args = parser.parse_args()
-    print(f"DEBUG: Arguments parsed: {args}") # <<< DEBUG PRINT 7
+    print(f"DEBUG: Arguments parsed: {args}")
 
-    # Determine initial simulation mode based on args and serial availability
-    # (hardware_interface prints its own warning if serial is missing)
-    sim_mode = not args.hardware or not ElectromagnetController.SERIAL_AVAILABLE
+    # Determine initial simulation mode
+    # Use imported HW_SERIAL_AVAILABLE for clarity
+    sim_mode = not args.hardware or not HW_SERIAL_AVAILABLE
 
     # --- Initialize Hardware Controller ---
-    print("DEBUG: Initializing hardware controller logic...") # <<< DEBUG PRINT 8
+    print("DEBUG: Initializing hardware controller logic...")
     hardware_controller = None
     if not sim_mode:
         print(f"DEBUG: Attempting hardware mode on {args.port}...")
         try:
             hardware_controller = ElectromagnetController(
                 grid_size=COIL_GRID_SIZE,
-                simulation_mode=False,
+                simulation_mode=False, # Explicitly request hardware mode
                 com_port=args.port,
                 baud_rate=args.baud,
                 rs485_dir_pin=args.dirpin
             )
-            sim_mode = hardware_controller.simulation_mode # Update sim_mode if hardware init failed
+            # Update sim_mode based on whether hardware init actually succeeded
+            sim_mode = hardware_controller.simulation_mode
         except Exception as e:
             print(f"FATAL: Unhandled error during hardware controller init: {e}")
             print("Exiting.")
             sys.exit(1)
 
-    # Ensure controller exists even in sim mode
+    # Ensure controller exists even in pure simulation mode
     if hardware_controller is None:
          print("DEBUG: Creating ElectromagnetController in simulation mode...")
          hardware_controller = ElectromagnetController(grid_size=COIL_GRID_SIZE, simulation_mode=True)
          sim_mode = True # Ensure sim_mode is True
 
-    print(f"DEBUG: Hardware controller ready (sim_mode={sim_mode}).") # <<< DEBUG PRINT 9
+    print(f"DEBUG: Hardware controller ready (sim_mode={sim_mode}).")
 
-    # --- Initialize Pygame and Chess Simulation ---
+    # --- Initialize Pygame (before getting display info) ---
     try:
-        print("DEBUG: Initializing Pygame...") # <<< DEBUG PRINT 10
+        print("DEBUG: Initializing Pygame...")
         pygame.init()
-        pygame.display.set_caption("Electromagnetic Chess")
-        print("DEBUG: Pygame initialized.") # <<< DEBUG PRINT 11
+        print("DEBUG: Pygame initialized.")
     except Exception as e:
         print(f"FATAL: Error initializing Pygame: {e}")
         sys.exit(1)
 
+    # --- Set Initial Window Size (Attempt Fullscreen Windowed) ---
     try:
-        print("DEBUG: Initializing ChessBoard...") # <<< DEBUG PRINT 12
-        # Determine effective debug mode for ChessBoard
-        effective_debug_mode = args.debug or False # Use parsed arg or default False
-        board = ChessBoard(hardware_controller=hardware_controller, debug_mode=effective_debug_mode)
-        print("DEBUG: ChessBoard initialized.") # <<< DEBUG PRINT 13
+        display_info = pygame.display.Info()
+        initial_width = display_info.current_w
+        initial_height = display_info.current_h
+        print(f"Detected Screen Size: {initial_width}x{initial_height}")
+    except Exception as e:
+        print(f"Warning: Could not get display info ({e}). Using default size.")
+        initial_width = DEFAULT_WINDOW_WIDTH
+        initial_height = DEFAULT_WINDOW_HEIGHT
+
+    # --- Initialize ChessBoard ---
+    try:
+        print("DEBUG: Initializing ChessBoard...")
+        # Set initial debug mode: ON unless --no-debug-start is specified OR --debug is explicitly false (though default is false)
+        initial_debug_mode = (args.debug or not args.no_debug_start)
+        board = ChessBoard(
+            hardware_controller=hardware_controller,
+            debug_mode=initial_debug_mode,
+            initial_window_size=(initial_width, initial_height) # Pass detected size
+        )
+        print("DEBUG: ChessBoard initialized.")
     except Exception as e:
         print(f"FATAL: Error initializing ChessBoard: {e}")
         import traceback
-        traceback.print_exc() # Print full traceback for ChessBoard init errors
+        traceback.print_exc()
         pygame.quit()
         sys.exit(1)
 
@@ -99,14 +126,17 @@ def main():
     # --- Print Instructions ---
     print("\n===== SMART ELECTROMAGNETIC CHESS =====")
     print("- Click piece to select, click square to target.")
-    print("- Keys: [R] Reset | [M] Cycle Pattern | [+/-] Speed")
-    print("- Toggles: [C] Coils | [F] Field | [P] Paths | [H] Heatmap | [D] Debug")
-    print(f"- Hardware Mode: {'ACTIVE' if not sim_mode else 'SIMULATED'} | [Esc] Quit")
+    print("- Keys: [R] Reset Board & Apply PID Slider Values")
+    print("- Keys: [M] Cycle Pattern | [+/-] Speed | [Esc] Quit")
+    print("- Toggles: [C] Coils | [F] Field | [P] Paths | [H] Heatmap")
+    print("- Toggles: [D] Debug | [X] Centers | [Y] Position Dots")
+    print(f"- Hardware Mode: {'ACTIVE' if not sim_mode else 'SIMULATED'}")
+    print("- Use Sliders to adjust PID (effective after Reset)")
     print("======================================\n")
 
     # --- Run Simulation ---
     try:
-        print("DEBUG: Starting board.run()...") # <<< DEBUG PRINT 14
+        print("DEBUG: Starting board.run()...")
         board.run()
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
@@ -124,6 +154,6 @@ def main():
         print("Simulation ended gracefully.")
 
 if __name__ == "__main__":
-    print("DEBUG: Running main block...") # <<< DEBUG PRINT 15
+    print("DEBUG: Running main block...")
     main()
-    print("DEBUG: main() finished.") # <<< DEBUG PRINT 16
+    print("DEBUG: main() finished.")
