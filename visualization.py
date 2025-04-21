@@ -31,7 +31,9 @@ class ChessRenderer:
         self.PATH_COLOR = (0, 0, 255, 150) # Blueish semi-transparent for path
         self.SEL_PATH_COLOR = (0, 255, 0, 150) # Greenish semi-transparent for selected path
         self.CAPTURE_PATH_COLOR = (255, 0, 0, 150) # Reddish semi-transparent for capture path
-
+        self.CENTER_MARKER_COLOR = (255, 0, 255) # Magenta for center markers
+        self.POSITION_DOT_COLOR = (255, 0, 0) # Red for mathematical position indicators
+        
         # Initialize fonts
         try:
             pygame.font.init() # Ensure font module is initialized
@@ -42,6 +44,9 @@ class ChessRenderer:
             print(f"Font Error: {e}. Using default fonts.")
             self.font = pygame.font.Font(None, 30)
             self.small_font = pygame.font.Font(None, 20)
+
+        # Set to True to show mathematical position dots
+        self.show_position_dots = False
 
 
     def draw_board(self, surface):
@@ -69,11 +74,26 @@ class ChessRenderer:
             rank_rect = rank_txt.get_rect(center=(-15, i * self.square_size_px + self.square_size_px // 2))
             surface.blit(rank_txt, rank_rect)
 
+    def draw_center_marker(self, surface, x, y, size=5):
+        """Draw a marker at the exact center of a square for debugging purposes."""
+        pygame.draw.line(surface, self.CENTER_MARKER_COLOR, (x-size, y), (x+size, y), 2)
+        pygame.draw.line(surface, self.CENTER_MARKER_COLOR, (x, y-size), (x, y+size), 2)
+        # Add a small circle to make the center more visible
+        pygame.draw.circle(surface, self.CENTER_MARKER_COLOR, (x, y), 2)
+
+    def board_to_pixel(self, board_pos):
+        """Convert board coordinates to pixel coordinates - centralized conversion function"""
+        col, row = board_pos
+        return (int(col * self.square_size_px + self.square_size_px // 2),
+                int(row * self.square_size_px + self.square_size_px // 2))
+
     def draw_piece(self, surface: pygame.Surface, piece: ChessPiece, selected=False):
         """Draws a single chess piece using its properties."""
         if not piece.active: return
 
-        x_px, y_px = piece.get_pixel_position()
+        # Get mathematical position in pixel coordinates (exact center of square)
+        x_center, y_center = self.board_to_pixel(piece.position)
+        
         symbol = piece.symbol
         text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
 
@@ -86,23 +106,20 @@ class ChessRenderer:
             piece_font = pygame.font.Font(None, size) # Fallback
 
         piece_text = piece_font.render(symbol, True, text_color)
-        text_rect = piece_text.get_rect(center=(int(x_px), int(y_px)))
+        text_rect = piece_text.get_rect(center=(x_center, y_center))
 
         # Draw selection highlight
         if selected:
             # Draw circle slightly larger than diameter, thicker line
             highlight_radius = int(piece.diameter / 2 * 1.2) # Use piece diameter property
-            pygame.draw.circle(surface, self.HIGHLIGHT, (int(x_px), int(y_px)), highlight_radius, 3)
+            pygame.draw.circle(surface, self.HIGHLIGHT, (x_center, y_center), highlight_radius, 3)
 
         # Draw the piece symbol
         surface.blit(piece_text, text_rect)
-
-        # Optional: Draw debug info (center dot, coords)
-        # pygame.draw.circle(surface, self.RED, (int(x_px), int(y_px)), 3)
-        # col, row = piece.get_board_position()
-        # coord_text = self.small_font.render(f"({col:.1f},{row:.1f})", True, self.YELLOW)
-        # coord_rect = coord_text.get_rect(center=(int(x_px), int(y_px + 30)))
-        # surface.blit(coord_text, coord_rect)
+        
+        # If enabled, draw a small dot at the exact mathematical position
+        if self.show_position_dots:
+            pygame.draw.circle(surface, self.POSITION_DOT_COLOR, (x_center, y_center), 3)
 
 
     def draw_pieces(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None):
@@ -126,23 +143,16 @@ class ChessRenderer:
         if selected_piece and selected_piece.active:
             self.draw_piece(surface, selected_piece, selected=True)
 
-    # --- draw_paths CORRECTED ---
     def draw_paths(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None):
         """Draws the movement paths for pieces."""
         path_surface = pygame.Surface((self.board_size_px, self.board_size_px), pygame.SRCALPHA)
         path_drawn = False
 
-        # Function to convert board coords (col, row) to pixel coords
-        def board_to_pixel(board_pos):
-            col, row = board_pos
-            return (int(col * self.square_size_px + self.square_size_px // 2),
-                    int(row * self.square_size_px + self.square_size_px // 2))
-
         for piece in pieces:
             # Draw regular path for active pieces
             if piece.active and len(piece.path) > 1:
                 # Convert path points (which are board coords) to pixels
-                pixel_points = [board_to_pixel(pos) for pos in piece.path] # Use helper function
+                pixel_points = [self.board_to_pixel(pos) for pos in piece.path]
                 if len(pixel_points) > 1:
                     color = self.SEL_PATH_COLOR if piece == selected_piece else self.PATH_COLOR
                     pygame.draw.lines(path_surface, color, False, pixel_points, 2)
@@ -151,17 +161,15 @@ class ChessRenderer:
             # Draw capture path for pieces being captured (inactive with path)
             elif not piece.active and len(piece.capture_path) > 0:
                  # Convert capture path nodes (board coords) to pixels
-                 pixel_points = [board_to_pixel(pos) for pos in piece.capture_path] # Use helper function
+                 pixel_points = [self.board_to_pixel(pos) for pos in piece.capture_path]
                  if len(pixel_points) > 1:
                       pygame.draw.lines(path_surface, self.CAPTURE_PATH_COLOR, False, pixel_points, 2)
                       # Mark end point of capture path
                       pygame.draw.circle(path_surface, self.RED, pixel_points[-1], 5)
                       path_drawn = True
 
-
         if path_drawn:
             surface.blit(path_surface, (0, 0))
-    # --- End Correction ---
 
 
     def draw_controls(self, surface: pygame.Surface, info: dict):
@@ -195,6 +203,8 @@ class ChessRenderer:
         info_y = draw_text("[F] Field Viz: " + ("ON" if info.get('show_field', False) else "OFF"), info_y, self.GREEN if info.get('show_field', False) else self.RED)
         info_y = draw_text("[P] Paths Viz: " + ("ON" if info.get('show_paths', True) else "OFF"), info_y, self.GREEN if info.get('show_paths', True) else self.RED)
         info_y = draw_text("[H] Heatmap: " + ("ON" if info.get('show_heatmap', False) else "OFF"), info_y, self.GREEN if info.get('show_heatmap', False) else self.RED)
+        info_y = draw_text("[X] Centers: " + ("ON" if info.get('show_center_markers', False) else "OFF"), info_y, self.GREEN if info.get('show_center_markers', False) else self.RED)
+        info_y = draw_text("[Y] Position Dots: " + ("ON" if self.show_position_dots else "OFF"), info_y, self.GREEN if self.show_position_dots else self.RED)
         info_y += 5
 
         # Sim Info

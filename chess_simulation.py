@@ -40,11 +40,11 @@ class ChessBoard:
         self.coil_grid = CoilGrid(size=COIL_GRID_SIZE, board_squares=BOARD_SQUARES)
         self.path_finder = PathFinder(board_size=BOARD_SQUARES)
 
-        # --- **** PID GAINS (for Direct Force - Needs Tuning!) **** ---
-        self.pid_kp = 150.0  # Start moderate
-        self.pid_ki = 0.0    # Start with Ki=0
-        self.pid_kd = 80.0   # Start higher for damping
-        # --- **** END GAINS **** ---
+        # --- PID GAINS ---
+        self.pid_kp = 150.0  # Proportional gain
+        self.pid_ki = 10.0   # Integral gain
+        self.pid_kd = 80.0   # Derivative gain
+        # --- END GAINS ---
 
         self.pid_integral = np.array([0.0, 0.0])
         self.pid_previous_error = np.array([0.0, 0.0]) # Needed if using dError/dt D term
@@ -55,6 +55,9 @@ class ChessBoard:
         self.selected_piece: ChessPiece | None = None; self.target_position: tuple[float, float] | None = None
         self.move_in_progress: bool = False; self.move_complete: bool = False; self.captured_piece: ChessPiece | None = None
         self.capture_step_index: int = 0; self.capture_path_finished: bool = False; self.temporarily_moved_pieces: list[ChessPiece] = []
+
+        # Debug Options
+        self.show_center_markers = False  # Option to show square centers
 
         # Simulation Parameters
         self.simulation_speed = 1.0; self.field_update_timer = 0.0; self.field_update_interval = 0.05
@@ -112,7 +115,9 @@ class ChessBoard:
                 target_col_int, target_row_int = clicked_square; piece_at_target = self.get_piece_at_square(clicked_square)
                 if piece_at_target and piece_at_target.color==self.selected_piece.color: print(f"Switched selection to {piece_at_target.symbol}"); self.selected_piece=piece_at_target; self.target_position=None
                 else:
-                    self.target_position=(float(target_col_int)+0.5, float(target_row_int)+0.5); print(f"Target set: {self.target_position}")
+                    # Set target to exact center of the square (col+0.5, row+0.5)
+                    self.target_position=(float(target_col_int)+0.5, float(target_row_int)+0.5)
+                    print(f"Target set: {self.target_position}")
                     path_is_clear = True
                     if self.selected_piece.piece_type != PieceType.KNIGHT:
                          if not self.is_path_clear(self.selected_piece.position, self.target_position):
@@ -196,41 +201,66 @@ class ChessBoard:
                 for c in range(min_c, max_c):
                     if (r-piece_coil_r)**2 + (c-piece_coil_c)**2 < keep_out_radius_sq: blocked_coils.add((r, c))
         return blocked_coils
-
+    
     def update_move(self, dt):
         """Updates piece physics using direct PID force. Coils avoid other pieces."""
         if not self.move_in_progress: return
-
+    
         effective_dt = dt * self.simulation_speed
         if effective_dt <= 0: return
-
+    
         if self.selected_piece and self.target_position:
             current_pos = self.selected_piece.position.copy()
             current_vel = self.selected_piece.velocity.copy()
             target_pos = np.array(self.target_position)
-
+    
             # --- PID Control Calculation ---
             error = target_pos - current_pos
             distance_to_target = np.linalg.norm(error)
+            
+            # Calculate distance-based scaling factor for D term
+            distance_factor = min(1.0, distance_to_target/0.5)  # Scale from 0-1 based on distance
+            effective_kd = self.pid_kd * distance_factor
+            
             p_term = self.pid_kp * error
-            i_term = np.array([0.0, 0.0])
+            
+            # Accumulate integral error
             if self.pid_ki > 1e-6:
                 self.pid_integral += error * effective_dt
                 integral_mag = np.linalg.norm(self.pid_integral)
                 if integral_mag > self.pid_integral_max: self.pid_integral = self.pid_integral * (self.pid_integral_max / integral_mag)
                 i_term = self.pid_ki * self.pid_integral
-            d_term = -self.pid_kd * current_vel # Velocity-based D term
+            else:
+                i_term = np.array([0.0, 0.0])
+                
+            # Apply scaled D term
+            d_term = -effective_kd * current_vel
+            
             pid_force = p_term + i_term + d_term # Total desired force
             max_pid_force = 5000.0
             pid_force_mag = np.linalg.norm(pid_force)
             if pid_force_mag > max_pid_force: pid_force = pid_force * (max_pid_force / pid_force_mag)
-
-            if self.debug_mode: print(f"\n--- Update Step dt={effective_dt:.4f} ---"); print(f"  Piece: {self.selected_piece.symbol} Pos:({current_pos[0]:.2f},{current_pos[1]:.2f}) Vel:({current_vel[0]:.2f},{current_vel[1]:.2f}) Dist:{distance_to_target:.2f}"); print(f"  PID Error: ({error[0]:.2f},{error[1]:.2f})"); print(f"  PID Terms: P:({p_term[0]:.1f},{p_term[1]:.1f}) I:({i_term[0]:.1f},{i_term[1]:.1f}) D:({d_term[0]:.1f},{d_term[1]:.1f})"); print(f"  PID Force: ({pid_force[0]:.2f},{pid_force[1]:.2f})") # PID Force applied
-
-            # Stop condition
-            stop_threshold = 0.05; velocity_threshold = 0.15
-            move_finished = (distance_to_target < stop_threshold and np.linalg.norm(current_vel) < velocity_threshold) or distance_to_target < 0.02
-
+    
+            if self.debug_mode: 
+                print(f"\n--- Update Step dt={effective_dt:.4f} ---")
+                print(f"  Piece: {self.selected_piece.symbol} Pos:({current_pos[0]:.2f},{current_pos[1]:.2f}) Vel:({current_vel[0]:.2f},{current_vel[1]:.2f}) Dist:{distance_to_target:.2f}")
+                print(f"  PID Error: ({error[0]:.2f},{error[1]:.2f})")
+                print(f"  PID Terms: P:({p_term[0]:.1f},{p_term[1]:.1f}) I:({i_term[0]:.1f},{i_term[1]:.1f}) D:({d_term[0]:.1f},{d_term[1]:.1f})")
+                print(f"  PID Force: ({pid_force[0]:.2f},{pid_force[1]:.2f})")
+    
+            # SIMPLE FIX: Force snap when we're close enough and slow enough
+            if distance_to_target < 0.01:
+                self.selected_piece.position = target_pos.copy()
+                self.selected_piece.velocity.fill(0.0)
+                move_finished = True
+            else:
+                # Normal stop conditions
+                stop_threshold = 0.03  # Position threshold
+                velocity_threshold = 0.1  # Velocity threshold
+                
+                # Check if we're close enough to target with slow enough velocity
+                move_finished = (distance_to_target < stop_threshold and np.linalg.norm(current_vel) < velocity_threshold)
+    
             if move_finished:
                 final_pos_before_snap=self.selected_piece.position.copy(); final_vel_before_snap=self.selected_piece.velocity.copy()
                 self.selected_piece.position=target_pos; self.selected_piece.velocity.fill(0.0)
@@ -264,14 +294,14 @@ class ChessBoard:
                     self.coil_grid.activate_coil_pattern(chosen_pattern,current_coil_pos,tuple(nominal_target_coil),intensity=current_intensity,radius=5,blocked_coils=blocked_coils_set)
                     self.coil_grid.update_magnetic_field(); self.heatmap_needs_update=True
                     self.hardware_controller.apply_state(self.coil_grid.coil_power, self.coil_grid.coil_current)
-
+    
                 # --- Force Application (Using DIRECT PID Force) ---
                 # Apply PID force directly to the piece physics
                 # apply_force no longer handles damping internally
                 self.selected_piece.apply_force(pid_force, effective_dt)
-
+    
                 if self.debug_mode: print(f"  End Pos:({self.selected_piece.position[0]:.2f},{self.selected_piece.position[1]:.2f}) End Vel:({self.selected_piece.velocity[0]:.2f},{self.selected_piece.velocity[1]:.2f})")
-
+    
         # --- Update Captured Piece ---
         if self.captured_piece and not self.capture_path_finished:
             node_reached_or_finished = self.captured_piece.follow_capture_path(self.capture_step_index)
@@ -279,14 +309,13 @@ class ChessBoard:
                 if self.capture_step_index<len(self.captured_piece.capture_path)-1: self.capture_step_index+=1
                 else: self.capture_path_finished=True; print(f"Capture movement finished for {self.captured_piece.symbol}.")
 
-
-    def reset(self): # No changes
+    def reset(self):
         print("Resetting board..."); self.initialize_pieces(); self.selected_piece=None; self.target_position=None; self.move_in_progress=False; self.move_complete=False; self.captured_piece=None; self.capture_step_index=0; self.capture_path_finished=False; self.temporarily_moved_pieces=[]; self.coil_grid.reset(); self.hardware_controller.reset_all_coils(); self.heatmap_needs_update=True; self.pid_integral.fill(0.0); self.pid_previous_error.fill(0.0); print("Board reset complete.")
 
-    def cycle_pattern(self): # No changes
+    def cycle_pattern(self):
         current_index=self.patterns.index(self.current_pattern); next_index=(current_index+1)%len(self.patterns); self.current_pattern=self.patterns[next_index]; print(f"Switched to pattern: {self.current_pattern}")
 
-    def load_heatmap(self): # No changes
+    def load_heatmap(self):
         if self.heatmap_needs_update or self.heatmap_surface is None:
             heatmap_path=self.coil_grid.plot_heatmap(filename="field_heatmap.png")
             if heatmap_path:
@@ -294,7 +323,7 @@ class ChessBoard:
                 except Exception as e: print(f"Error loading heatmap image '{heatmap_path}': {e}"); self.heatmap_surface=None
             else: print("Heatmap generation failed."); self.heatmap_surface=None
 
-    def run(self): # No changes
+    def run(self):
         running = True
         while running:
             dt_sec = min(self.clock.tick(FPS) / 1000.0, 0.1)
@@ -313,17 +342,40 @@ class ChessBoard:
                     elif key == pygame.K_PLUS or key == pygame.K_EQUALS: self.simulation_speed = min(10.0, self.simulation_speed + 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
                     elif key == pygame.K_MINUS: self.simulation_speed = max(0.1, self.simulation_speed - 0.2); print(f"Sim speed: {self.simulation_speed:.1f}x")
                     elif key == pygame.K_d: self.debug_mode = not self.debug_mode; print(f"Debug mode: {self.debug_mode}")
+                    elif key == pygame.K_x: self.show_center_markers = not self.show_center_markers; print(f"Center markers: {self.show_center_markers}")
+                    elif key == pygame.K_y: self.renderer.show_position_dots = not self.renderer.show_position_dots; print(f"Position dots: {self.renderer.show_position_dots}")
                     elif key == pygame.K_ESCAPE: running = False
+                    
             self.update_move(dt_sec)
-            self.renderer.draw_board(self.screen);
+            self.renderer.draw_board(self.screen)
+            
+            # Draw center markers if enabled
+            if self.show_center_markers:
+                for row in range(BOARD_SQUARES):
+                    for col in range(BOARD_SQUARES):
+                        pixel_x = int((col + 0.5) * SQUARE_SIZE_PX)
+                        pixel_y = int((row + 0.5) * SQUARE_SIZE_PX)
+                        self.renderer.draw_center_marker(self.screen, pixel_x, pixel_y)
+            
             if self.show_coils: self.coil_grid.draw(self.screen, BOARD_SIZE_PX)
             if self.show_field: self.coil_grid.draw_field_overlay(self.screen, BOARD_SIZE_PX)
             self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece)
             if self.show_paths: self.renderer.draw_paths(self.screen, self.pieces, self.selected_piece)
-            info_dict = { 'selected_piece':self.selected_piece,'target_position':self.target_position,'move_in_progress':self.move_in_progress,
-                          'move_complete':self.move_complete,'show_coils':self.show_coils,'show_field':self.show_field,'show_paths':self.show_paths,
-                          'show_heatmap':self.show_heatmap,'current_pattern':self.current_pattern,'simulation_speed':self.simulation_speed, }
-            self.renderer.draw_controls(self.screen, info_dict); self.renderer.draw_capture_area(self.screen, self.captured_white, self.captured_black)
+            info_dict = {
+                'selected_piece': self.selected_piece,
+                'target_position': self.target_position,
+                'move_in_progress': self.move_in_progress,
+                'move_complete': self.move_complete,
+                'show_coils': self.show_coils,
+                'show_field': self.show_field,
+                'show_paths': self.show_paths,
+                'show_heatmap': self.show_heatmap,
+                'show_center_markers': self.show_center_markers,
+                'current_pattern': self.current_pattern,
+                'simulation_speed': self.simulation_speed,
+            }
+            self.renderer.draw_controls(self.screen, info_dict)
+            self.renderer.draw_capture_area(self.screen, self.captured_white, self.captured_black)
             if self.show_heatmap: self.load_heatmap()
             self.renderer.draw_heatmap(self.screen, self.heatmap_surface if self.show_heatmap else None)
             pygame.display.flip()

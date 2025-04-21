@@ -86,11 +86,14 @@ class ChessPiece:
         """Get position in board coordinates (col, row float)"""
         return tuple(self.position)
 
+    # In chess_pieces.py - replace the get_pixel_position method with this:
+    
     def get_pixel_position(self):
-        """Get position in pixel coordinates for rendering"""
+        """
+        Get position in pixel coordinates for rendering - FIXED VERSION
+        """
         col, row = self.position
-        return (int(col * self.square_size + self.square_size // 2),
-                int(row * self.square_size + self.square_size // 2))
+        return (int(col * self.square_size), int(row * self.square_size))
 
     def get_coil_position(self):
         """Get position in coil grid coordinates (col, row float)"""
@@ -98,7 +101,6 @@ class ChessPiece:
         return (col * (self.coil_grid_size / self.board_squares),
                 row * (self.coil_grid_size / self.board_squares))
 
-    # --- **** apply_force NO LONGER HAS DAMPING **** ---
     def apply_force(self, force, dt):
         """Apply external force to the piece and update its position"""
         mass = (self.diameter ** 2) * self.height * 0.0001
@@ -118,7 +120,6 @@ class ChessPiece:
         self.position = new_position
         self.path.append(self.position.copy())
         if len(self.path) > 100: self.path.pop(0)
-    # --- **** END CHANGE **** ---
 
     def follow_capture_path(self, step_index):
         """Follow the capture path by moving towards the step_index node"""
@@ -162,5 +163,3 @@ class ChessPiece:
             print(f"Returned {self.symbol} from temporary move.")
         else:
             print(f"Warning: No temporary move position recorded for {self.symbol}.")
-
-    # Removed draw method - belongs in ChessRenderer

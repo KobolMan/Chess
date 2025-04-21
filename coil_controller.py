@@ -23,7 +23,7 @@ class CoilGrid:
             safe_power = np.clip(power, 0, 100); self.coil_power[row, col] = safe_power
             self.coil_current[row, col] = np.sign(current_direction) if safe_power > 0 else 0
 
-    # --- **** ADDED blocked_coils PARAMETER **** ---
+    # --- **** MODIFIED blocked_coils PARAMETER & PATTERN IMPLEMENTATION **** ---
     def activate_coil_pattern(self, pattern_type, position, target=None, intensity=100, radius=4, blocked_coils=None):
         """
         Activate a simulated pattern of coils, avoiding blocked coils.
@@ -74,17 +74,37 @@ class CoilGrid:
             target_x, target_y = target; direction = np.array([target_x-center_x, target_y-center_y]); distance_to_target = np.linalg.norm(direction)
             if distance_to_target < 0.1: self.activate_coil_pattern("radial",position,target,intensity*0.5,radius,blocked_coils); return
             direction_norm = direction/distance_to_target
+            
+            # --- **** IMPROVED DIRECTED PATTERN **** ---
+            # Use narrower focus for more precise control
+            direction_focus_factor = 1.0  # Higher value = narrower focus on direction
+            
             for r in range(min_r_loop, max_r_loop):
                 for c in range(min_c_loop, max_c_loop):
                     rel_pos=np.array([c-center_x,r-center_y]); distance=np.linalg.norm(rel_pos)
                     if distance <= radius * 1.5:
-                        proj=np.dot(rel_pos,direction_norm); perp_dist_sq=max(0,distance**2-proj**2); perp_distance=np.sqrt(perp_dist_sq)
-                        power_factor=max(0,1-distance/(radius*1.5))**2; direction_focus=max(0,1-perp_distance/(radius*0.8))**2
-                        power=intensity*power_factor*direction_focus; proj_threshold=0.2*radius
+                        proj=np.dot(rel_pos,direction_norm)
+                        perp_dist_sq=max(0,distance**2-proj**2)
+                        perp_distance=np.sqrt(perp_dist_sq)
+                        
+                        # Improved power scaling - more focused along direction vector
+                        power_factor=max(0,1-distance/(radius*1.5))**2
+                        direction_focus=max(0,1-perp_distance/(radius*0.7))**direction_focus_factor
+                        power=intensity*power_factor*direction_focus
+                        
+                        # More precise control with better gradient
+                        proj_threshold=0.15*radius  # Reduced threshold for more sensitivity
+                        
                         if proj>proj_threshold: current=-1
                         elif proj<-proj_threshold: current=1
-                        else: current=-1; power*=0.2
-                        power=max(0,power); safe_update_coil(r,c,power,current)
+                        else: 
+                            current=-1 if proj >= 0 else 1
+                            power*=0.1  # Reduced power for neutral zone
+                            
+                        power=max(0,power)
+                        safe_update_coil(r,c,power,current)
+            # --- **** END IMPROVEMENT **** ---
+            
         elif pattern_type == "knight" and target is not None:
             target_x, target_y = target; dx=target_x-center_x; dy=target_y-center_y
             if abs(dx)>abs(dy): point1_x=center_x+np.sign(dx)*(abs(dx)*2/3); point1_y=center_y; point2_x=point1_x; point2_y=center_y+np.sign(dy)*abs(dy)
@@ -122,23 +142,45 @@ class CoilGrid:
                         field_contribution=direction_vec*strength*current; field_vec+=field_contribution
                 self.magnetic_field[r_field,c_field]=field_vec
 
-    # --- **** calculate_force NO LONGER USES force_scale **** ---
-    def calculate_force(self, piece_position, piece_magnet_strength): # Removed force_scale
-        """Calculate base magnetic force (before PID scaling/damping)"""
-        col_board, row_board = piece_position; col_grid=col_board*(self.size/self.board_squares); row_grid=row_board*(self.size/self.board_squares)
-        col_idx=int(col_grid); row_idx=int(row_grid); dx=col_grid-col_idx; dy=row_grid-row_idx
-        if not (0<=col_idx<self.size-1 and 0<=row_idx<self.size-1):
-            col_idx=np.clip(col_idx,0,self.size-1); row_idx=np.clip(row_idx,0,self.size-1)
-            # Return base field scaled only by magnet strength
-            return self.magnetic_field[row_idx,col_idx] * piece_magnet_strength
-        field_00=self.magnetic_field[row_idx,col_idx]; field_01=self.magnetic_field[row_idx,col_idx+1]; field_10=self.magnetic_field[row_idx+1,col_idx]; field_11=self.magnetic_field[row_idx+1,col_idx+1]
-        interp_x_top=(1-dx)*field_00[0]+dx*field_01[0]; interp_x_bottom=(1-dx)*field_10[0]+dx*field_11[0]; field_x=(1-dy)*interp_x_top+dy*interp_x_bottom
-        interp_y_top=(1-dx)*field_00[1]+dx*field_01[1]; interp_y_bottom=(1-dx)*field_10[1]+dx*field_11[1]; field_y=(1-dy)*interp_y_top+dy*interp_y_bottom
-        interpolated_field=np.array([field_x,field_y])
-        # Force is just field * magnet_strength. PID gains handle magnitude.
+    # --- **** calculate_force IMPROVED **** ---
+    def calculate_force(self, piece_position, piece_magnet_strength):
+        """Calculate base magnetic force with improved interpolation"""
+        col_board, row_board = piece_position
+        col_grid = col_board * (self.size/self.board_squares)
+        row_grid = row_board * (self.size/self.board_squares)
+        
+        # Use bilinear interpolation for smoother force calculation
+        col_idx = int(col_grid)
+        row_idx = int(row_grid)
+        dx = col_grid - col_idx
+        dy = row_grid - row_idx
+        
+        if not (0 <= col_idx < self.size-1 and 0 <= row_idx < self.size-1):
+            col_idx = np.clip(col_idx, 0, self.size-2)  # Ensure we have room for interpolation
+            row_idx = np.clip(row_idx, 0, self.size-2)
+            dx = 0  # Reset fractional parts if we had to clip
+            dy = 0
+            
+        field_00 = self.magnetic_field[row_idx, col_idx]
+        field_01 = self.magnetic_field[row_idx, col_idx+1]
+        field_10 = self.magnetic_field[row_idx+1, col_idx]
+        field_11 = self.magnetic_field[row_idx+1, col_idx+1]
+        
+        # Bilinear interpolation
+        interp_x_top = (1-dx)*field_00[0] + dx*field_01[0]
+        interp_x_bottom = (1-dx)*field_10[0] + dx*field_11[0]
+        field_x = (1-dy)*interp_x_top + dy*interp_x_bottom
+        
+        interp_y_top = (1-dx)*field_00[1] + dx*field_01[1]
+        interp_y_bottom = (1-dx)*field_10[1] + dx*field_11[1]
+        field_y = (1-dy)*interp_y_top + dy*interp_y_bottom
+        
+        interpolated_field = np.array([field_x, field_y])
+        
+        # Force is field * magnet_strength
         force = interpolated_field * piece_magnet_strength
         return force
-    # --- **** END CHANGE **** ---
+    # --- **** END IMPROVEMENT **** ---
 
     def draw(self, surface, board_pixel_size): # No changes
         coil_pixel_size=board_pixel_size/self.size; coil_surface=pygame.Surface((board_pixel_size,board_pixel_size),pygame.SRCALPHA)
@@ -149,7 +191,6 @@ class CoilGrid:
                 if power>0: alpha=int(np.clip(power*2.0,50,200)); color=(255,100,100,alpha) if current>0 else (100,100,255,alpha); radius=int(coil_pixel_size/2*0.7*(0.6+0.4*power/100)); pygame.draw.circle(coil_surface,color,(int(x),int(y)),radius)
         surface.blit(coil_surface,(0,0))
 
-    # --- **** draw_field_overlay CORRECTED **** ---
     def draw_field_overlay(self, surface, board_pixel_size, resolution=20):
         """Draw the SIMULATED magnetic field vectors"""
         step_size=board_pixel_size/resolution
@@ -190,14 +231,11 @@ class CoilGrid:
                         p1=(end_x,end_y)
                         p2=(end_x-head_length*math.cos(angle-math.pi/6), end_y-head_length*math.sin(angle-math.pi/6))
                         p3=(end_x-head_length*math.cos(angle+math.pi/6), end_y-head_length*math.sin(angle+math.pi/6))
-                        # **** Moved draw_polygon INSIDE the if block ****
                         try:
                              pygame.draw.polygon(field_surface, arrow_color, [(int(p1[0]),int(p1[1])), (int(p2[0]), int(p2[1])), (int(p3[0]), int(p3[1]))])
                         except ValueError: pass # Ignore potential errors
-                    # **** END MOVE ****
 
         surface.blit(field_surface,(0,0))
-    # --- **** END CORRECTION **** ---
 
     def generate_heatmap(self, resolution=100): # No changes needed
         heatmap=np.zeros((resolution,resolution)); field_magnitudes=np.linalg.norm(self.magnetic_field,axis=2)
