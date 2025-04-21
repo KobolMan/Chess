@@ -16,12 +16,13 @@ from visualization import ChessRenderer
 from hardware_interface import ElectromagnetController # Type hint
 
 # --- Constants ---
-BOARD_SIZE_PX = 800
+DEFAULT_BOARD_SIZE_PX = 800
 BOARD_SQUARES = 8
-SQUARE_SIZE_PX = BOARD_SIZE_PX // BOARD_SQUARES
+DEFAULT_SQUARE_SIZE_PX = DEFAULT_BOARD_SIZE_PX // BOARD_SQUARES
 COIL_GRID_SIZE = 20
-WINDOW_WIDTH = BOARD_SIZE_PX + 400
-WINDOW_HEIGHT = BOARD_SIZE_PX + 200
+DEFAULT_HEATMAP_SIZE_PX = DEFAULT_BOARD_SIZE_PX  # Make heatmap same size as board
+DEFAULT_WINDOW_WIDTH = DEFAULT_BOARD_SIZE_PX + DEFAULT_HEATMAP_SIZE_PX + 400  # Includes heatmap on left
+DEFAULT_WINDOW_HEIGHT = DEFAULT_BOARD_SIZE_PX + 200
 FPS = 60
 
 class ChessBoard:
@@ -34,16 +35,32 @@ class ChessBoard:
         self.debug_mode = True # Default True for tuning PID
         # self.debug_mode = debug_mode
 
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        # Make window resizable
+        self.screen = pygame.display.set_mode((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT), pygame.RESIZABLE)
         pygame.display.set_caption("Electromagnetic Chess Simulation (Direct PID Force)")
-        self.renderer = ChessRenderer(BOARD_SIZE_PX, BOARD_SQUARES, WINDOW_WIDTH, WINDOW_HEIGHT)
+        
+        # Initialize sizes - these will be updated when the window is resized
+        self.board_size_px = DEFAULT_BOARD_SIZE_PX
+        self.square_size_px = DEFAULT_SQUARE_SIZE_PX
+        self.heatmap_size_px = DEFAULT_HEATMAP_SIZE_PX
+        self.window_width = DEFAULT_WINDOW_WIDTH
+        self.window_height = DEFAULT_WINDOW_HEIGHT
+        
+        # Adjust renderer to accommodate heatmap position
+        self.board_x_offset = self.heatmap_size_px  # Board now starts after heatmap
+        self.renderer = ChessRenderer(self.board_size_px, BOARD_SQUARES, self.window_width, self.window_height, board_x_offset=self.board_x_offset)
         self.coil_grid = CoilGrid(size=COIL_GRID_SIZE, board_squares=BOARD_SQUARES)
         self.path_finder = PathFinder(board_size=BOARD_SQUARES)
 
-        # --- PID GAINS ---
-        self.pid_kp = 150.0  # Proportional gain
-        self.pid_ki = 10.0   # Integral gain
-        self.pid_kd = 80.0   # Derivative gain
+        # --- IMPROVED PID GAINS ---
+        # Reduce proportional gain to decrease oscillation
+        self.pid_kp = 120.0  # Reduced from 150.0
+        # Reduce integral gain to prevent overshooting
+        self.pid_ki = 5.0    # Reduced from 10.0
+        # Increase derivative gain for more damping
+        self.pid_kd = 120.0  # Increased from 80.0
+        # Add terminal damping for final approach to reduce oscillation
+        self.terminal_damping = 3.0 # New parameter for final approach
         # --- END GAINS ---
 
         self.pid_integral = np.array([0.0, 0.0])
@@ -64,7 +81,11 @@ class ChessBoard:
         # Damping coefficient removed - PID's Kd handles it
 
         # Visualization Options
-        self.show_coils=False; self.show_field=False; self.show_paths=True; self.show_heatmap=False
+        self.show_coils = False
+        self.show_field = False
+        self.show_paths = True
+        self.show_heatmap = True  # Set to True by default as requested
+        self.renderer.show_position_dots = True  # Show position dots by default for better debugging
 
         # Move Pattern Options
         self.current_pattern="directed"; self.patterns=["directed","knight","radial"]
@@ -76,7 +97,55 @@ class ChessBoard:
 
         self.initialize_pieces()
         print(f"ChessBoard initialized. HW Sim: {self.hardware_controller.simulation_mode}, Debug: {self.debug_mode}")
-        print(f"PID Gains (Direct Force): Kp={self.pid_kp}, Ki={self.pid_ki}, Kd={self.pid_kd}, Imax={self.pid_integral_max}")
+        print(f"PID Gains (Direct Force): Kp={self.pid_kp}, Ki={self.pid_ki}, Kd={self.pid_kd}, Terminal Damping={self.terminal_damping}, Imax={self.pid_integral_max}")
+        print("COORDINATE SYSTEM: Square centers are at integer coordinates (i,j)")
+
+    def handle_resize(self, new_width, new_height):
+        """Handle window resize events by adjusting all size-dependent variables"""
+        print(f"Resizing window to {new_width}x{new_height}")
+        
+        # Keep minimum sizes to prevent layout issues
+        min_width = 1000  # Minimum width
+        min_height = 600  # Minimum height
+        
+        # Apply minimums
+        self.window_width = max(new_width, min_width)
+        self.window_height = max(new_height, min_height)
+        
+        # Update dimensions
+        side_panel_width = 400  # Fixed width for control panel
+        available_width = self.window_width - side_panel_width
+        
+        # Calculate board and heatmap sizes - they should be the same
+        # and take up equal parts of the available space
+        board_size = min(
+            (available_width) // 2,  # Half of available width
+            self.window_height - 100  # Leave some vertical space
+        )
+        
+        # Board should be square and a multiple of 8
+        board_size = (board_size // BOARD_SQUARES) * BOARD_SQUARES
+        
+        self.board_size_px = board_size
+        self.heatmap_size_px = board_size
+        self.square_size_px = board_size // BOARD_SQUARES
+        
+        # Update board offset
+        self.board_x_offset = self.heatmap_size_px
+        
+        # Update renderer with new dimensions
+        self.renderer = ChessRenderer(
+            self.board_size_px, BOARD_SQUARES, 
+            self.window_width, self.window_height, 
+            board_x_offset=self.board_x_offset
+        )
+        
+        # Force heatmap regeneration
+        self.heatmap_needs_update = True
+        
+        # Update pieces with new square size
+        for piece in self.pieces:
+            piece.square_size = self.square_size_px
 
 
     def initialize_pieces(self):
@@ -87,14 +156,20 @@ class ChessBoard:
             (0,1):(PieceColor.BLACK,PieceType.PAWN),(1,1):(PieceColor.BLACK,PieceType.PAWN), (2,1):(PieceColor.BLACK,PieceType.PAWN),(3,1):(PieceColor.BLACK,PieceType.PAWN), (4,1):(PieceColor.BLACK,PieceType.PAWN),(5,1):(PieceColor.BLACK,PieceType.PAWN), (6,1):(PieceColor.BLACK,PieceType.PAWN),(7,1):(PieceColor.BLACK,PieceType.PAWN),
             (0,7):(PieceColor.WHITE,PieceType.ROOK),(1,7):(PieceColor.WHITE,PieceType.KNIGHT), (2,7):(PieceColor.WHITE,PieceType.BISHOP),(3,7):(PieceColor.WHITE,PieceType.QUEEN), (4,7):(PieceColor.WHITE,PieceType.KING),(5,7):(PieceColor.WHITE,PieceType.BISHOP), (6,7):(PieceColor.WHITE,PieceType.KNIGHT),(7,7):(PieceColor.WHITE,PieceType.ROOK),
             (0,6):(PieceColor.WHITE,PieceType.PAWN),(1,6):(PieceColor.WHITE,PieceType.PAWN), (2,6):(PieceColor.WHITE,PieceType.PAWN),(3,6):(PieceColor.WHITE,PieceType.PAWN), (4,6):(PieceColor.WHITE,PieceType.PAWN),(5,6):(PieceColor.WHITE,PieceType.PAWN), (6,6):(PieceColor.WHITE,PieceType.PAWN),(7,6):(PieceColor.WHITE,PieceType.PAWN), }
-        for pos, (color, ptype) in setup.items(): self.pieces.append(ChessPiece(color, ptype, pos, board_squares=BOARD_SQUARES, square_size=SQUARE_SIZE_PX, coil_grid_size=COIL_GRID_SIZE))
+        for pos, (color, ptype) in setup.items(): 
+            # Set piece position directly at integer coordinates
+            self.pieces.append(ChessPiece(color, ptype, pos, board_squares=BOARD_SQUARES, square_size=self.square_size_px, coil_grid_size=COIL_GRID_SIZE))
 
     def get_piece_at_square(self, square_col_row):
         """Finds the active piece occupying the given integer square."""
         target_col, target_row = square_col_row
         for piece in self.pieces:
-            if piece.active: p_col_int=int(round(piece.position[0])); p_row_int=int(round(piece.position[1]));
-            if p_col_int == target_col and p_row_int == target_row: return piece
+            if piece.active:
+                # The position already using integer coordinates for square centers
+                p_col_int = int(round(piece.position[0]))
+                p_row_int = int(round(piece.position[1]))
+                if p_col_int == target_col and p_row_int == target_row: 
+                    return piece
         return None
 
     def is_square_occupied(self, square_col_row, ignore_piece=None):
@@ -103,42 +178,90 @@ class ChessBoard:
 
     def handle_click(self, pixel_pos):
         """Processes mouse clicks using integer square checks."""
-        x_pix, y_pix = pixel_pos;
-        if not (0<=x_pix<BOARD_SIZE_PX and 0<=y_pix<BOARD_SIZE_PX): return
-        clicked_col_int=x_pix//SQUARE_SIZE_PX; clicked_row_int=y_pix//SQUARE_SIZE_PX; clicked_square=(clicked_col_int, clicked_row_int)
+        x_pix, y_pix = pixel_pos
+        
+        # Adjust for board offset
+        x_pix -= self.board_x_offset
+        
+        if not (0 <= x_pix < self.board_size_px and 0 <= y_pix < self.board_size_px): 
+            print("Click outside board area")
+            return
+        
+        # Get the exact square that was clicked
+        clicked_col_int = x_pix // self.square_size_px
+        clicked_row_int = y_pix // self.square_size_px
+        clicked_square = (clicked_col_int, clicked_row_int)
+        
+        print(f"Clicked on square: {clicked_square}")
+        
         if self.move_in_progress: return
         piece_in_clicked_square = self.get_piece_at_square(clicked_square)
         if self.selected_piece:
+            # Convert from piece position to square indices for the selected piece
             selected_square = (int(round(self.selected_piece.position[0])), int(round(self.selected_piece.position[1])))
-            if clicked_square == selected_square: print("Deselected piece."); self.selected_piece=None; self.target_position=None
+            
+            if clicked_square == selected_square: 
+                print("Deselected piece.")
+                self.selected_piece = None
+                self.target_position = None
             else:
-                target_col_int, target_row_int = clicked_square; piece_at_target = self.get_piece_at_square(clicked_square)
-                if piece_at_target and piece_at_target.color==self.selected_piece.color: print(f"Switched selection to {piece_at_target.symbol}"); self.selected_piece=piece_at_target; self.target_position=None
+                target_col_int, target_row_int = clicked_square
+                piece_at_target = self.get_piece_at_square(clicked_square)
+                if piece_at_target and piece_at_target.color == self.selected_piece.color: 
+                    print(f"Switched selection to {piece_at_target.symbol}")
+                    self.selected_piece = piece_at_target
+                    self.target_position = None
                 else:
-                    # Set target to exact center of the square (col+0.5, row+0.5)
-                    self.target_position=(float(target_col_int)+0.5, float(target_row_int)+0.5)
-                    print(f"Target set: {self.target_position}")
+                    # Set target to exact integer coordinates (no +0.5 offset)
+                    self.target_position = (float(target_col_int), float(target_row_int))
+                    print(f"Target set: {self.target_position} (center of square {clicked_square})")
+                    
                     path_is_clear = True
                     if self.selected_piece.piece_type != PieceType.KNIGHT:
                          if not self.is_path_clear(self.selected_piece.position, self.target_position):
                               print("Path blocked. Attempting clearance...")
-                              if self.attempt_to_clear_path(self.selected_piece.position, self.target_position): print("Path cleared.")
-                              else: print("Clearance failed. Move cancelled."); path_is_clear=False; self.target_position=None
+                              if self.attempt_to_clear_path(self.selected_piece.position, self.target_position): 
+                                  print("Path cleared.")
+                              else: 
+                                  print("Clearance failed. Move cancelled.")
+                                  path_is_clear = False
+                                  self.target_position = None
+                                  
                     if path_is_clear and self.target_position is not None:
                          if piece_at_target:
-                             self.captured_piece=piece_at_target; self.captured_piece.active=False; print(f"Capturing {self.captured_piece.symbol}")
-                             capture_target_col_row=self.capture_target_white if self.captured_piece.color==PieceColor.WHITE else self.capture_target_black
-                             start_rc=(target_row_int, target_col_int); target_rc=(int(round(capture_target_col_row[1])), int(round(capture_target_col_row[0])))
-                             path_nodes_rc=self.path_finder.find_capture_path(start_rc, target_rc, self.pieces, self.captured_piece)
-                             if path_nodes_rc: self.captured_piece.capture_path=[(float(c)+0.5, float(r)+0.5) for r,c in path_nodes_rc]; print(f"Generated capture path with {len(self.captured_piece.capture_path)} points.")
-                             else: print("Warning: Could not generate capture path!"); self.captured_piece.capture_path=[]
-                             if self.captured_piece.color == PieceColor.WHITE: self.captured_white.append(self.captured_piece)
-                             else: self.captured_black.append(self.captured_piece)
-                         else: self.captured_piece=None
+                             self.captured_piece = piece_at_target
+                             self.captured_piece.active = False
+                             print(f"Capturing {self.captured_piece.symbol}")
+                             capture_target_col_row = self.capture_target_white if self.captured_piece.color == PieceColor.WHITE else self.capture_target_black
+                             # For pathfinding, convert to integer grid
+                             start_rc = (target_row_int, target_col_int)
+                             target_rc = (int(capture_target_col_row[1]), int(capture_target_col_row[0]))
+                             path_nodes_rc = self.path_finder.find_capture_path(start_rc, target_rc, self.pieces, self.captured_piece)
+                             if path_nodes_rc: 
+                                 # Convert from (row, col) to (col, row) - use integer coordinates directly
+                                 self.captured_piece.capture_path = [(float(c), float(r)) for r, c in path_nodes_rc]
+                                 print(f"Generated capture path with {len(self.captured_piece.capture_path)} points.")
+                             else: 
+                                 print("Warning: Could not generate capture path!")
+                                 self.captured_piece.capture_path = []
+                             if self.captured_piece.color == PieceColor.WHITE: 
+                                 self.captured_white.append(self.captured_piece)
+                             else: 
+                                 self.captured_black.append(self.captured_piece)
+                         else: 
+                             self.captured_piece = None
                          self.start_move() # Start the move process
         else:
-            if piece_in_clicked_square: self.selected_piece=piece_in_clicked_square; self.target_position=None; self.captured_piece=None; self.temporarily_moved_pieces=[]; print(f"Selected {self.selected_piece.symbol}")
-            else: print("Clicked empty square."); self.selected_piece=None; self.target_position=None
+            if piece_in_clicked_square: 
+                self.selected_piece = piece_in_clicked_square
+                self.target_position = None
+                self.captured_piece = None
+                self.temporarily_moved_pieces = []
+                print(f"Selected {self.selected_piece.symbol} at position {self.selected_piece.position}")
+            else: 
+                print("Clicked empty square.")
+                self.selected_piece = None
+                self.target_position = None
 
     def is_path_clear(self, start_pos_col_row, end_pos_col_row):
         """Checks for obstructions along a straight line path (uses float coords)."""
@@ -149,7 +272,7 @@ class ChessBoard:
             t = i / num_checks; check_c = start_c + delta_c * t; check_r = start_r + delta_r * t
             for piece in self.pieces:
                 if piece.active and piece != self.selected_piece:
-                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / SQUARE_SIZE_PX * 0.6)
+                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / self.square_size_px * 0.6)
                     if np.sum((np.array([piece_c, piece_r]) - np.array([check_c, check_r]))**2) < collision_radius**2: return False
         return True
 
@@ -162,7 +285,7 @@ class ChessBoard:
             t = i / num_checks; check_c = start_c + delta_c * t; check_r = start_r + delta_r * t
             for piece in self.pieces:
                 if piece.active and piece != self.selected_piece and piece not in self.temporarily_moved_pieces:
-                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / SQUARE_SIZE_PX * 0.6)
+                    piece_c, piece_r = piece.position; collision_radius = (piece.diameter / self.square_size_px * 0.6)
                     if np.sum((np.array([piece_c,piece_r])-np.array([check_c,check_r]))**2) < collision_radius**2 and piece not in blocking_pieces: blocking_pieces.append(piece)
         if not blocking_pieces: return True
         piece_to_move = next((p for p in blocking_pieces if p.piece_type == PieceType.PAWN), blocking_pieces[0])
@@ -171,11 +294,15 @@ class ChessBoard:
         perp_vec = np.array([-delta_r / path_len, delta_c / path_len])
         move_distance = 0.6; original_pos = piece_to_move.position.copy()
         for move_dir in [perp_vec * move_distance, perp_vec * -move_distance]:
-            temp_target_pos = original_pos + move_dir; target_square = (int(round(temp_target_pos[0])), int(round(temp_target_pos[1])))
+            temp_target_pos = original_pos + move_dir; 
+            # Convert to square indices
+            target_square = (int(round(temp_target_pos[0])), int(round(temp_target_pos[1])))
             if 0<=target_square[0]<BOARD_SQUARES and 0<=target_square[1]<BOARD_SQUARES:
                  if not self.is_square_occupied(target_square, ignore_piece=piece_to_move):
                     print(f"Temporarily moving {piece_to_move.symbol} aside."); piece_to_move.position_before_temp_move = original_pos
-                    piece_to_move.position = np.array([target_square[0]+0.5, target_square[1]+0.5]); piece_to_move.velocity *= 0.1; piece_to_move.path = [piece_to_move.position.copy()]
+                    # Set to target square using integer coordinates
+                    piece_to_move.position = np.array([target_square[0], target_square[1]])
+                    piece_to_move.velocity *= 0.1; piece_to_move.path = [piece_to_move.position.copy()]
                     self.temporarily_moved_pieces.append(piece_to_move); return True
         print(f"Could not find clear spot for {piece_to_move.symbol}."); return False
 
@@ -233,9 +360,18 @@ class ChessBoard:
             else:
                 i_term = np.array([0.0, 0.0])
                 
-            # Apply scaled D term
+            # Apply scaled D term - default damping
             d_term = -effective_kd * current_vel
             
+            # IMPROVEMENT: Add terminal damping when close to target
+            # This increases the damping force when very close to target to prevent oscillation
+            terminal_zone = 0.3
+            if distance_to_target < terminal_zone:
+                # Scale up additional damping as we get closer
+                terminal_factor = 1.0 - (distance_to_target / terminal_zone)
+                terminal_damping_force = -self.terminal_damping * current_vel * terminal_factor
+                d_term = d_term + terminal_damping_force
+                
             pid_force = p_term + i_term + d_term # Total desired force
             max_pid_force = 5000.0
             pid_force_mag = np.linalg.norm(pid_force)
@@ -244,19 +380,20 @@ class ChessBoard:
             if self.debug_mode: 
                 print(f"\n--- Update Step dt={effective_dt:.4f} ---")
                 print(f"  Piece: {self.selected_piece.symbol} Pos:({current_pos[0]:.2f},{current_pos[1]:.2f}) Vel:({current_vel[0]:.2f},{current_vel[1]:.2f}) Dist:{distance_to_target:.2f}")
+                print(f"  Target: ({target_pos[0]:.2f}, {target_pos[1]:.2f}) - Square: ({int(target_pos[0])},{int(target_pos[1])})")
                 print(f"  PID Error: ({error[0]:.2f},{error[1]:.2f})")
                 print(f"  PID Terms: P:({p_term[0]:.1f},{p_term[1]:.1f}) I:({i_term[0]:.1f},{i_term[1]:.1f}) D:({d_term[0]:.1f},{d_term[1]:.1f})")
                 print(f"  PID Force: ({pid_force[0]:.2f},{pid_force[1]:.2f})")
     
-            # SIMPLE FIX: Force snap when we're close enough and slow enough
+            # IMPROVED STOP CONDITION: Check position, velocity and acceleration trends
             if distance_to_target < 0.01:
                 self.selected_piece.position = target_pos.copy()
                 self.selected_piece.velocity.fill(0.0)
                 move_finished = True
             else:
-                # Normal stop conditions
+                # More sensitive stop conditions with velocity check
                 stop_threshold = 0.03  # Position threshold
-                velocity_threshold = 0.1  # Velocity threshold
+                velocity_threshold = 0.05  # Stricter velocity threshold
                 
                 # Check if we're close enough to target with slow enough velocity
                 move_finished = (distance_to_target < stop_threshold and np.linalg.norm(current_vel) < velocity_threshold)
@@ -345,22 +482,38 @@ class ChessBoard:
                     elif key == pygame.K_x: self.show_center_markers = not self.show_center_markers; print(f"Center markers: {self.show_center_markers}")
                     elif key == pygame.K_y: self.renderer.show_position_dots = not self.renderer.show_position_dots; print(f"Position dots: {self.renderer.show_position_dots}")
                     elif key == pygame.K_ESCAPE: running = False
+                elif event.type == pygame.VIDEORESIZE:
+                    # Handle window resize event
+                    self.handle_resize(event.w, event.h)
                     
             self.update_move(dt_sec)
+            
+            # Clear screen
+            self.screen.fill(self.renderer.DARK_GRAY)
+            
+            # Draw heatmap on the left side
+            if self.show_heatmap: 
+                self.load_heatmap()
+                self.renderer.draw_heatmap_beside_board(self.screen, self.heatmap_surface if self.show_heatmap else None)
+            
+            # Draw board with offset
             self.renderer.draw_board(self.screen)
             
             # Draw center markers if enabled
             if self.show_center_markers:
                 for row in range(BOARD_SQUARES):
                     for col in range(BOARD_SQUARES):
-                        pixel_x = int((col + 0.5) * SQUARE_SIZE_PX)
-                        pixel_y = int((row + 0.5) * SQUARE_SIZE_PX)
+                        # Draw markers at integer coordinates for square centers
+                        pixel_x = int(col * self.square_size_px + self.square_size_px // 2) + self.board_x_offset
+                        pixel_y = int(row * self.square_size_px + self.square_size_px // 2)
                         self.renderer.draw_center_marker(self.screen, pixel_x, pixel_y)
             
-            if self.show_coils: self.coil_grid.draw(self.screen, BOARD_SIZE_PX)
-            if self.show_field: self.coil_grid.draw_field_overlay(self.screen, BOARD_SIZE_PX)
+            if self.show_coils: self.coil_grid.draw(self.screen, self.board_size_px, x_offset=self.board_x_offset)
+            if self.show_field: self.coil_grid.draw_field_overlay(self.screen, self.board_size_px, x_offset=self.board_x_offset)
+            
             self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece)
             if self.show_paths: self.renderer.draw_paths(self.screen, self.pieces, self.selected_piece)
+            
             info_dict = {
                 'selected_piece': self.selected_piece,
                 'target_position': self.target_position,
@@ -374,9 +527,10 @@ class ChessBoard:
                 'current_pattern': self.current_pattern,
                 'simulation_speed': self.simulation_speed,
             }
-            self.renderer.draw_controls(self.screen, info_dict)
-            self.renderer.draw_capture_area(self.screen, self.captured_white, self.captured_black)
-            if self.show_heatmap: self.load_heatmap()
-            self.renderer.draw_heatmap(self.screen, self.heatmap_surface if self.show_heatmap else None)
+            
+            panel_x = self.board_x_offset + self.board_size_px
+            self.renderer.draw_controls(self.screen, info_dict, panel_x=panel_x)
+            self.renderer.draw_capture_area(self.screen, self.captured_white, self.captured_black, panel_x=panel_x)
+            
             pygame.display.flip()
         print("Simulation loop ended.")

@@ -237,7 +237,7 @@ class CoilGrid:
 
         surface.blit(field_surface,(0,0))
 
-    def generate_heatmap(self, resolution=100): # No changes needed
+    def generate_heatmap(self, resolution=200):  # Increased resolution for better heatmap
         heatmap=np.zeros((resolution,resolution)); field_magnitudes=np.linalg.norm(self.magnetic_field,axis=2)
         max_mag=field_magnitudes.max() if field_magnitudes.max()>1e-6 else 1.0
         for r in range(resolution):
@@ -247,6 +247,21 @@ class CoilGrid:
                 elif 0<=col_idx<self.size and 0<=row_idx<self.size: heatmap[r,c]=field_magnitudes[row_idx,col_idx]
         heatmap=gaussian_filter(heatmap,sigma=max(1.0,resolution/100.0)); heatmap/=max_mag; return heatmap
 
-    def plot_heatmap(self, filename="field_heatmap.png", figsize=(6, 6)): # No changes needed
-        try: heatmap_data=self.generate_heatmap(); plt.figure(figsize=figsize); cmap=plt.cm.viridis; plt.imshow(heatmap_data,cmap=cmap,aspect='equal',origin='upper',interpolation='bilinear',vmin=0,vmax=1); plt.colorbar(label='Normalized Field Strength'); plt.title('Magnetic Field Strength'); plt.xticks([]); plt.yticks([]); plt.tight_layout(); plt.savefig(filename,dpi=150); plt.close(); return filename
-        except Exception as e: print(f"Error generating heatmap plot: {e}"); return None
+    def plot_heatmap(self, filename="field_heatmap.png", figsize=(10, 10)):  # Larger heatmap figure
+        try: 
+            heatmap_data=self.generate_heatmap()
+            plt.figure(figsize=figsize)
+            # Use a more visually distinctive colormap
+            cmap = plt.cm.jet
+            plt.imshow(heatmap_data, cmap=cmap, aspect='equal', origin='upper', interpolation='bilinear', vmin=0, vmax=1)
+            plt.colorbar(label='Normalized Field Strength')
+            plt.title('Magnetic Field Strength')
+            plt.xticks([])
+            plt.yticks([])
+            plt.tight_layout()
+            plt.savefig(filename, dpi=200)  # Higher DPI for clearer image
+            plt.close()
+            return filename
+        except Exception as e: 
+            print(f"Error generating heatmap plot: {e}")
+            return None

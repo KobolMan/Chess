@@ -8,12 +8,13 @@ from chess_pieces import ChessPiece, PieceColor, PieceType, PIECE_SYMBOLS # Impo
 class ChessRenderer:
     """Handles all Pygame rendering for the chess simulation."""
 
-    def __init__(self, board_size_px, squares, window_width, window_height):
+    def __init__(self, board_size_px, squares, window_width, window_height, board_x_offset=0):
         self.board_size_px = board_size_px
         self.squares = squares
         self.square_size_px = board_size_px // squares
         self.window_width = window_width
         self.window_height = window_height
+        self.board_x_offset = board_x_offset  # Board's X position offset for heatmap
 
         # Colors
         self.WHITE = (255, 255, 255)
@@ -46,19 +47,18 @@ class ChessRenderer:
             self.small_font = pygame.font.Font(None, 20)
 
         # Set to True to show mathematical position dots
-        self.show_position_dots = False
+        self.show_position_dots = True  # Default to True for better debugging
 
 
     def draw_board(self, surface):
         """Draw the chessboard grid and labels."""
-        surface.fill(self.DARK_GRAY) # Fill entire window background
-
         # Draw squares
         for r in range(self.squares):
             for c in range(self.squares):
                 color = self.LIGHT_SQUARE if (r + c) % 2 == 0 else self.DARK_SQUARE
                 pygame.draw.rect(surface, color,
-                                 (c * self.square_size_px, r * self.square_size_px,
+                                 (c * self.square_size_px + self.board_x_offset, 
+                                  r * self.square_size_px,
                                   self.square_size_px, self.square_size_px))
 
         # Draw rank/file labels
@@ -66,12 +66,12 @@ class ChessRenderer:
         for i in range(self.squares):
             # Files (a-h) below board
             file_txt = self.small_font.render(chr(ord('a') + i), True, label_color)
-            file_rect = file_txt.get_rect(center=(i * self.square_size_px + self.square_size_px // 2,
+            file_rect = file_txt.get_rect(center=(i * self.square_size_px + self.square_size_px // 2 + self.board_x_offset,
                                                   self.board_size_px + 15))
             surface.blit(file_txt, file_rect)
             # Ranks (1-8) left of board
             rank_txt = self.small_font.render(str(self.squares - i), True, label_color) # 8 at top
-            rank_rect = rank_txt.get_rect(center=(-15, i * self.square_size_px + self.square_size_px // 2))
+            rank_rect = rank_txt.get_rect(center=(self.board_x_offset - 15, i * self.square_size_px + self.square_size_px // 2))
             surface.blit(rank_txt, rank_rect)
 
     def draw_center_marker(self, surface, x, y, size=5):
@@ -82,17 +82,20 @@ class ChessRenderer:
         pygame.draw.circle(surface, self.CENTER_MARKER_COLOR, (x, y), 2)
 
     def board_to_pixel(self, board_pos):
-        """Convert board coordinates to pixel coordinates - centralized conversion function"""
+        """Convert board coordinates to pixel coordinates"""
         col, row = board_pos
-        return (int(col * self.square_size_px + self.square_size_px // 2),
+        # Apply offset and calculate the center of the square using integer coordinates
+        return (int(col * self.square_size_px + self.square_size_px // 2 + self.board_x_offset), 
                 int(row * self.square_size_px + self.square_size_px // 2))
 
     def draw_piece(self, surface: pygame.Surface, piece: ChessPiece, selected=False):
         """Draws a single chess piece using its properties."""
         if not piece.active: return
 
-        # Get mathematical position in pixel coordinates (exact center of square)
-        x_center, y_center = self.board_to_pixel(piece.position)
+        # Get position from piece and apply board offset
+        pixel_pos = piece.get_pixel_position()
+        x_center, y_center = pixel_pos
+        x_center += self.board_x_offset  # Apply board offset
         
         symbol = piece.symbol
         text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
@@ -120,6 +123,11 @@ class ChessRenderer:
         # If enabled, draw a small dot at the exact mathematical position
         if self.show_position_dots:
             pygame.draw.circle(surface, self.POSITION_DOT_COLOR, (x_center, y_center), 3)
+            
+            # Also draw the board coordinates near the dot
+            col, row = piece.position
+            coord_text = self.small_font.render(f"({col:.1f}, {row:.1f})", True, self.POSITION_DOT_COLOR)
+            surface.blit(coord_text, (x_center + 10, y_center - 10))
 
 
     def draw_pieces(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None):
@@ -151,31 +159,51 @@ class ChessRenderer:
         for piece in pieces:
             # Draw regular path for active pieces
             if piece.active and len(piece.path) > 1:
-                # Convert path points (which are board coords) to pixels
-                pixel_points = [self.board_to_pixel(pos) for pos in piece.path]
+                # Use the piece's own get_pixel_position method 
+                # and then apply our offset
+                pixel_points = []
+                for pos in piece.path:
+                    # Store the position
+                    piece_orig_pos = piece.position
+                    # Temporarily set the position to the path point
+                    piece.position = pos
+                    # Get pixel position
+                    px, py = piece.get_pixel_position()
+                    # Add our offset
+                    px += self.board_x_offset
+                    pixel_points.append((px, py))
+                    # Restore the original position
+                    piece.position = piece_orig_pos
+                
                 if len(pixel_points) > 1:
                     color = self.SEL_PATH_COLOR if piece == selected_piece else self.PATH_COLOR
-                    pygame.draw.lines(path_surface, color, False, pixel_points, 2)
+                    pygame.draw.lines(surface, color, False, pixel_points, 2)
                     path_drawn = True
 
             # Draw capture path for pieces being captured (inactive with path)
             elif not piece.active and len(piece.capture_path) > 0:
-                 # Convert capture path nodes (board coords) to pixels
-                 pixel_points = [self.board_to_pixel(pos) for pos in piece.capture_path]
+                 # Use the correct conversion for capture path points
+                 pixel_points = []
+                 for pos in piece.capture_path:
+                     col, row = pos
+                     # Convert to pixel coords with center offset
+                     px = int(col * self.square_size_px + self.square_size_px // 2) + self.board_x_offset
+                     py = int(row * self.square_size_px + self.square_size_px // 2)
+                     pixel_points.append((px, py))
+                     
                  if len(pixel_points) > 1:
-                      pygame.draw.lines(path_surface, self.CAPTURE_PATH_COLOR, False, pixel_points, 2)
+                      pygame.draw.lines(surface, self.CAPTURE_PATH_COLOR, False, pixel_points, 2)
                       # Mark end point of capture path
-                      pygame.draw.circle(path_surface, self.RED, pixel_points[-1], 5)
+                      pygame.draw.circle(surface, self.RED, pixel_points[-1], 5)
                       path_drawn = True
 
-        if path_drawn:
-            surface.blit(path_surface, (0, 0))
 
-
-    def draw_controls(self, surface: pygame.Surface, info: dict):
+    def draw_controls(self, surface: pygame.Surface, info: dict, panel_x=None):
         """Draws the control panel using info dictionary."""
-        panel_x = self.board_size_px
-        panel_width = self.window_width - self.board_size_px
+        if panel_x is None:
+            panel_x = self.board_size_px + self.board_x_offset
+        
+        panel_width = self.window_width - panel_x
         pygame.draw.rect(surface, self.LIGHT_GRAY, (panel_x, 0, panel_width, self.window_height))
 
         title_text = self.font.render("EM Chess Control", True, self.BLACK)
@@ -232,10 +260,13 @@ class ChessRenderer:
              info_y = draw_text("Status: Select Piece", info_y, self.BLACK)
 
 
-    def draw_capture_area(self, surface: pygame.Surface, captured_white: list, captured_black: list):
+    def draw_capture_area(self, surface: pygame.Surface, captured_white: list, captured_black: list, panel_x=None):
         """Draws the display for captured pieces."""
-        area_x = self.board_size_px + 15
-        area_width = self.window_width - self.board_size_px - 30
+        if panel_x is None:
+            panel_x = self.board_size_px + self.board_x_offset
+            
+        area_x = panel_x + 15
+        area_width = self.window_width - panel_x - 30
         icon_size = 25 # Smaller icons
         spacing = 4
         white_y_start = self.window_height - 200 # Position area lower down
@@ -265,28 +296,28 @@ class ChessRenderer:
         draw_captured_list(white_y_start, "Captured by Black:", captured_white, self.WHITE)
         draw_captured_list(black_y_start, "Captured by White:", captured_black, self.BLACK)
 
-
-    def draw_heatmap(self, surface: pygame.Surface, heatmap_image: pygame.Surface = None):
-        """Draws the magnetic field heatmap below the board."""
-        heatmap_area_y = self.board_size_px + 30 # Area below board and labels
-        heatmap_area_height = self.window_height - heatmap_area_y - 10
-        heatmap_area_width = self.board_size_px # Use width of board
+    def draw_heatmap_beside_board(self, surface: pygame.Surface, heatmap_image: pygame.Surface = None):
+        """Draw the heatmap to the left of the board, same size as the board."""
         heatmap_area_x = 0
+        heatmap_area_y = 0
+        heatmap_area_width = self.board_x_offset
+        heatmap_area_height = self.board_size_px
 
         # Background for heatmap area
         pygame.draw.rect(surface, self.DARK_GRAY,
-                         (heatmap_area_x, heatmap_area_y - 5, heatmap_area_width, heatmap_area_height + 5))
+                         (heatmap_area_x, heatmap_area_y, heatmap_area_width, heatmap_area_height))
 
         # Title
         title_text = self.small_font.render("Field Strength Heatmap (H to toggle)", True, self.WHITE)
-        title_rect = title_text.get_rect(midtop=(heatmap_area_x + heatmap_area_width // 2, heatmap_area_y))
+        title_rect = title_text.get_rect(midtop=(heatmap_area_x + heatmap_area_width // 2, 10))
         surface.blit(title_text, title_rect)
 
         if heatmap_image:
             img_rect = heatmap_image.get_rect()
             # Scale heatmap to fit, maintaining aspect ratio
             scale = min((heatmap_area_width * 0.95) / img_rect.width,
-                        (heatmap_area_height - 25) / img_rect.height) # Leave space for title
+                        (heatmap_area_height - 30) / img_rect.height) # Leave space for title
+            
             scaled_w = int(img_rect.width * scale)
             scaled_h = int(img_rect.height * scale)
 
@@ -294,7 +325,7 @@ class ChessRenderer:
                 scaled_img = pygame.transform.smoothscale(heatmap_image, (scaled_w, scaled_h))
                 # Center the scaled image
                 display_x = heatmap_area_x + (heatmap_area_width - scaled_w) // 2
-                display_y = heatmap_area_y + 25 + (heatmap_area_height - 25 - scaled_h) // 2
+                display_y = heatmap_area_y + 30 # Offset from top to leave room for title
                 surface.blit(scaled_img, (display_x, display_y))
         else:
             # Placeholder text if no heatmap image provided
@@ -303,12 +334,16 @@ class ChessRenderer:
                                                heatmap_area_y + heatmap_area_height // 2))
             surface.blit(ph_text, ph_rect)
 
+    # Old method kept for compatibility
+    def draw_heatmap(self, surface: pygame.Surface, heatmap_image: pygame.Surface = None):
+        """Legacy method - redirects to draw_heatmap_beside_board."""
+        self.draw_heatmap_beside_board(surface, heatmap_image)
 
     # Add highlight_square etc. if needed by ChessBoard logic directly
     def highlight_square(self, surface, row, col, color=None):
         """Highlight a square on the board (e.g., for valid moves)."""
         if color is None: color = self.HIGHLIGHT
-        rect = pygame.Rect(col * self.square_size_px, row * self.square_size_px,
+        rect = pygame.Rect(col * self.square_size_px + self.board_x_offset, row * self.square_size_px,
                            self.square_size_px, self.square_size_px)
         # Draw semi-transparent rectangle overlay
         s = pygame.Surface((self.square_size_px, self.square_size_px), pygame.SRCALPHA)

@@ -86,14 +86,14 @@ class ChessPiece:
         """Get position in board coordinates (col, row float)"""
         return tuple(self.position)
 
-    # In chess_pieces.py - replace the get_pixel_position method with this:
-    
     def get_pixel_position(self):
         """
-        Get position in pixel coordinates for rendering - FIXED VERSION
+        Get position in pixel coordinates for rendering based on integer coordinates
         """
         col, row = self.position
-        return (int(col * self.square_size), int(row * self.square_size))
+        # Add half a square to center in the square
+        return (int(col * self.square_size + self.square_size // 2), 
+                int(row * self.square_size + self.square_size // 2))
 
     def get_coil_position(self):
         """Get position in coil grid coordinates (col, row float)"""
