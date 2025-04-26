@@ -59,7 +59,7 @@ class ChessRenderer:
             self.very_small_font = pygame.font.Font(None, 20)
             self.coord_font = pygame.font.Font(None, 16)
     
-        self.show_position_dots = True  # Default to True for better debugging
+        self.show_position_dots = False  # Default to True for better debugging
 
     def draw_board(self, surface, y_offset=0):
         """Draw the chessboard grid and labels."""
@@ -201,23 +201,23 @@ class ChessRenderer:
         """Draws a group of captured pieces in a grid layout."""
         if not captured_pieces:
             return
-    
+
         # Arrange in a grid
         piece_size = 40  # Size for each piece display
         spacing = 10     # Space between pieces
         max_pieces_per_row = 4  # Number of pieces per row
-    
+
         # Calculate grid positions
         row, col = 0, 0
         for piece in captured_pieces:
             # Calculate position
             x = panel_x + 10 + col * (piece_size + spacing)
             y = start_y + row * (piece_size + spacing)
-    
+
             # Draw piece background
             piece_rect = pygame.Rect(x, y, piece_size, piece_size)
             pygame.draw.rect(surface, self.LIGHT_GRAY, piece_rect)
-    
+
             # Draw piece symbol
             try:
                 piece_font = pygame.font.SysFont('segoeuisymbol', 30)
@@ -227,13 +227,13 @@ class ChessRenderer:
                 surface.blit(symbol_text, symbol_rect)
             except Exception as e:
                 print(f"Error drawing captured piece: {e}")
-    
+
             # Move to next position
             col += 1
             if col >= max_pieces_per_row:
                 col = 0
                 row += 1
-    
+
         return row + 1  # Return the number of rows used
 
     # --- FIX 2: Updated draw_captured_pieces_panel Method ---

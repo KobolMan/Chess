@@ -5,6 +5,8 @@
 
 26/04/2025
 
+    - Try another coil distribution structure. A bigger one at the center of the square and smaller ones at strategic locations, for example at the intersection corner of different squares.
+
 Chess Project Analysis and Recommendations
 Project Structure Assessment
 The current project structure follows a reasonably good separation of concerns:
