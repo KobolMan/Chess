@@ -98,13 +98,13 @@ class ChessBoard:
         self.path_finder = PathFinder(board_size=BOARD_SQUARES)
 
         # --- PID GAINS (Iteration 3) ---
-        self.pid_kp = 50.0
-        self.pid_ki = 5.0
-        self.pid_kd = 50.0
-        self.terminal_damping = 5.0
-        self.pid_integral_max = 40.0
-
-        # Temporary values controlled by sliders
+        self.pid_kp = 80.0  # Updated from 50.0
+        self.pid_ki = 0.2   # Updated from 5.0
+        self.pid_kd = 44.0  # Updated from 50.0
+        self.terminal_damping = 5.0  # Keeping this value
+        self.pid_integral_max = 40.0  # Keeping this value
+        
+        # Also update the temporary values to match
         self.temp_pid_kp = self.pid_kp
         self.temp_pid_ki = self.pid_ki
         self.temp_pid_kd = self.pid_kd
@@ -248,18 +248,79 @@ class ChessBoard:
                 pass
 
     def handle_resize(self, new_width, new_height):
-        """Handle window resize events."""
-        if new_width <= 0 or new_height <= 0: return # Ignore invalid sizes
-        print(f"Resizing window to {new_width}x{new_height}")
+        """
+        Handle window resize events with enhanced debounce logic and
+        multi-monitor support.
+        """
+        # Ignore invalid sizes or extremes (likely transitioning between displays)
+        if new_width <= 100 or new_height <= 100 or new_width > 10000 or new_height > 10000:
+            return
+        
+        # Get current time for debounce calculations
+        current_time = time.time()
+        
+        # Initialize debounce tracking attributes if needed
+        if not hasattr(self, '_last_resize_time'):
+            self._last_resize_time = 0
+        if not hasattr(self, '_last_resize_dims'):
+            self._last_resize_dims = (self.window_width, self.window_height)
+        if not hasattr(self, '_resize_settling'):
+            self._resize_settling = False
+        if not hasattr(self, '_resize_cooldown'):
+            self._resize_cooldown = 0.5  # Seconds to wait after major resize
+        
+        # Skip if in settling period after major size change
+        if self._resize_settling:
+            if current_time - self._last_resize_time < self._resize_cooldown:
+                return
+            else:
+                # End of settling period
+                self._resize_settling = False
+        
+        # Detect if this is a significant change (likely moving between monitors)
+        last_width, last_height = self._last_resize_dims
+        width_change = abs(new_width - last_width) / max(last_width, 1)
+        height_change = abs(new_height - last_height) / max(last_height, 1)
+        
+        if width_change > 0.2 or height_change > 0.2:  # 20% change indicates major resize
+            # Major resize detected - likely moving between monitors
+            # Enter settling period where small adjustments are ignored
+            self._resize_settling = True
+            self._last_resize_time = current_time
+            self._last_resize_dims = (new_width, new_height)
+            print(f"Major resize detected: {new_width}x{new_height}")
+        else:
+            # Normal resize behavior with debouncing
+            
+            # Skip if resize happens too quickly after previous resize
+            if current_time - self._last_resize_time < 0.3:  # 300ms debounce
+                return
+            
+            # Skip if dimensions haven't changed much
+            if abs(new_width - last_width) < 10 and abs(new_height - last_height) < 10:
+                return
+        
+        # Update tracking variables
+        self._last_resize_time = current_time
+        self._last_resize_dims = (new_width, new_height)
+        
+        print(f"Applying resize to {new_width}x{new_height}")
+        
+        # *** Actual resize logic begins here ***
         # Recalculate layout
         self._calculate_layout(new_width, new_height)
+        
         # Recreate screen surface
         try:
-            self.screen = pygame.display.set_mode((self.window_width, self.window_height), pygame.RESIZABLE)
+            # Use SCALED flag for better handling of high DPI displays
+            self.screen = pygame.display.set_mode(
+                (self.window_width, self.window_height), 
+                pygame.RESIZABLE | pygame.SCALED
+            )
         except pygame.error as e:
             print(f"Error resizing display: {e}")
-            # Potentially try to revert size or handle error gracefully
             return
+            
         # Update renderer
         self.renderer = ChessRenderer(
             self.board_size_px, BOARD_SQUARES,
@@ -267,7 +328,11 @@ class ChessBoard:
             board_x_offset=self.board_x_offset,
             heatmap_size_px=self.heatmap_size_px
         )
-        for piece in self.pieces: piece.square_size = self.square_size_px
+        
+        # Update square size for pieces
+        for piece in self.pieces: 
+            piece.square_size = self.square_size_px
+            
         # Recreate sliders AFTER renderer (uses renderer colors)
         self._create_pid_sliders()
         self.heatmap_surface = None
@@ -577,6 +642,16 @@ class ChessBoard:
                     # We rely on checking coordinates in handle_click.
                     if event.button == 1:
                          self.handle_click(event.pos)
+                    # Add right-click to cancel selection
+                    elif event.button == 3:  # Right mouse button
+                         if self.selected_piece:
+                             print("Selection canceled (right-click).")
+                             self.selected_piece = None
+                             self.target_position = None
+                             self.temporarily_moved_pieces = []
+                             # Return pieces moved aside during clearance to original positions
+                             for piece in self.temporarily_moved_pieces:
+                                 piece.return_from_temporary_move()
                 elif event.type == pygame.KEYDOWN:
                     key = event.key
                     if key == pygame.K_r: self.reset()
@@ -590,7 +665,18 @@ class ChessBoard:
                     elif key == pygame.K_d: self.debug_mode = not self.debug_mode; print(f"Debug mode: {self.debug_mode}")
                     elif key == pygame.K_x: self.show_center_markers = not self.show_center_markers; print(f"Center markers: {self.show_center_markers}")
                     elif key == pygame.K_y: self.renderer.show_position_dots = not self.renderer.show_position_dots; print(f"Position dots: {self.renderer.show_position_dots}")
-                    elif key == pygame.K_ESCAPE: running = False
+                    # Add Escape key to cancel selection
+                    elif key == pygame.K_ESCAPE:
+                        if self.selected_piece:
+                            print("Selection canceled (Escape key).")
+                            self.selected_piece = None
+                            self.target_position = None
+                            self.temporarily_moved_pieces = []
+                            # Return pieces moved aside during clearance to original positions
+                            for piece in self.temporarily_moved_pieces:
+                                piece.return_from_temporary_move()
+                        else:
+                            running = False  # Only quit if no selection active
                 elif event.type == pygame.VIDEORESIZE: self.handle_resize(event.w, event.h)
 
             # --- Update Simulation Logic ---
@@ -640,7 +726,6 @@ class ChessBoard:
                  # This assumes widgets were created with self.screen
                  for slider in self.pid_sliders.values(): slider.draw()
                  for textbox in self.pid_textboxes.values(): textbox.draw()
-
 
             pygame.display.flip() # Update screen
             if self.move_complete: self.move_complete = False # Reset flag

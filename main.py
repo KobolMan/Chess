@@ -128,6 +128,7 @@ def main():
     print("- Click piece to select, click square to target.")
     print("- Keys: [R] Reset Board & Apply PID Slider Values")
     print("- Keys: [M] Cycle Pattern | [+/-] Speed | [Esc] Quit")
+    print("- Keys: [Right-click] or [Esc] Cancel Selection")
     print("- Toggles: [C] Coils | [F] Field | [P] Paths | [H] Heatmap")
     print("- Toggles: [D] Debug | [X] Centers | [Y] Position Dots")
     print(f"- Hardware Mode: {'ACTIVE' if not sim_mode else 'SIMULATED'}")

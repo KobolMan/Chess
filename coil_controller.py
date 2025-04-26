@@ -166,28 +166,69 @@ class CoilGrid:
             print(f"Warning: Unknown coil pattern type '{pattern_type}'. Using radial.")
             self.activate_coil_pattern("radial", position, target, intensity * 0.5, radius, blocked_coils)
 
-
     def update_magnetic_field(self):
         """
         Calculates the simulated magnetic field vector at each grid point based on
         the current state of coil_power and coil_current. Uses a vectorized approach.
+        Includes robust error handling to prevent NaN values.
         """
-        self.magnetic_field.fill(0); influence_radius_sq = 8**2
+        # Clear previous field
+        self.magnetic_field.fill(0)
+        
+        # Define influence radius for optimization
+        influence_radius_sq = 8**2
+        
+        # Find active coils (non-zero power)
         active_coils_indices = np.argwhere(self.coil_power > 0)
-        if active_coils_indices.size == 0: return
+        if active_coils_indices.size == 0:
+            # No active coils, return early with zeroed field
+            return
+        
+        # Extract active coil positions, powers, and currents
         active_coil_pos = np.array([[c, r] for r, c in active_coils_indices])
         active_powers = self.coil_power[active_coils_indices[:, 0], active_coils_indices[:, 1]]
         active_currents = self.coil_current[active_coils_indices[:, 0], active_coils_indices[:, 1]]
-        grid_y, grid_x = np.indices((self.size, self.size)); grid_pos = np.stack((grid_x, grid_y), axis=-1)
+        
+        # Create grid positions
+        grid_y, grid_x = np.indices((self.size, self.size))
+        grid_pos = np.stack((grid_x, grid_y), axis=-1)
+        
+        # Calculate vectors from each coil to each grid point
         vec_coil_to_field = grid_pos[:, :, np.newaxis, :] - active_coil_pos[np.newaxis, np.newaxis, :, :]
-        dist_sq = np.sum(vec_coil_to_field**2, axis=3); dist_sq[dist_sq == 0] = 1e-6
-        within_influence = dist_sq <= influence_radius_sq; dist = np.sqrt(dist_sq)
-        direction_vec = vec_coil_to_field / dist[..., np.newaxis]
+        
+        # Calculate squared distances
+        dist_sq = np.sum(vec_coil_to_field**2, axis=3)
+        
+        # Avoid division by zero - replace zeros with a small value
+        # Use a larger epsilon to prevent very small values that could cause instability
+        epsilon = 1e-5
+        dist_sq = np.maximum(dist_sq, epsilon)
+        
+        # Determine which grid points are within influence radius of coils
+        within_influence = dist_sq <= influence_radius_sq
+        
+        # Calculate distances
+        dist = np.sqrt(dist_sq)
+        
+        # Normalize vectors to get direction
+        # Explicitly handle division to prevent NaN values
+        direction_vec = np.zeros_like(vec_coil_to_field, dtype=float)
+        np.divide(vec_coil_to_field, dist[..., np.newaxis], out=direction_vec, where=dist[..., np.newaxis] > epsilon)
+        
+        # Calculate field strength based on distance
         strength = active_powers * (1.0 / (1.0 + dist_sq))
+        
+        # Calculate field contribution from each coil
         field_contribution = direction_vec * (strength * active_currents)[..., np.newaxis]
+        
+        # Mask contributions to only include those within influence radius
         masked_contribution = field_contribution * within_influence[..., np.newaxis]
-        self.magnetic_field = np.sum(masked_contribution, axis=2)
-
+        
+        # Sum all contributions
+        field_sum = np.sum(masked_contribution, axis=2)
+        
+        # Final safety check for NaN values - replace with zeros if any remain
+        self.magnetic_field = np.nan_to_num(field_sum, nan=0.0)
 
     def calculate_force(self, piece_position, piece_magnet_strength):
         """
@@ -207,13 +248,11 @@ class CoilGrid:
         force = interpolated_field * piece_magnet_strength
         return force
 
-
     def calculate_total_current(self):
         """Calculates the total estimated current draw based on coil power levels."""
         active_powers = self.coil_power[self.coil_power > 0]
         total_amps = np.sum(active_powers / 100.0 * MAX_COIL_AMPS)
         return total_amps
-
 
     def draw(self, surface, board_pixel_size, x_offset=0):
         """Draws the coil grid visualization onto the provided surface."""
@@ -231,7 +270,6 @@ class CoilGrid:
                     radius = int(coil_pixel_size / 2 * 0.7 * (0.6 + 0.4 * power / 100))
                     pygame.draw.circle(coil_surface, color, (int(x), int(y)), radius)
         surface.blit(coil_surface, (x_offset, 0))
-
 
     def draw_field_overlay(self, surface, board_pixel_size, resolution=20, x_offset=0):
         """Draws the calculated magnetic field vectors as arrows."""
@@ -285,87 +323,161 @@ class CoilGrid:
                         except ValueError: pass
         surface.blit(field_surface, (x_offset, 0))
 
-
-    # --- REVERTED generate_heatmap ---
     def generate_heatmap(self, resolution=200):
         """
-        Generates heatmap data using manual bilinear interpolation.
-        Applies Gaussian filter after interpolation and normalization.
-        (Reverted to logic matching previous visually correct output)
+        Generates heatmap data using robust bilinear interpolation with
+        comprehensive error handling.
         """
         try:
+            # Create empty heatmap array
             heatmap = np.zeros((resolution, resolution))
-            # Calculate magnitudes from the pre-computed field
-            field_magnitudes = np.linalg.norm(self.magnetic_field, axis=2)
-            # Find max magnitude *before* interpolation/filtering for normalization
+            
+            # Immediately check if magnetic field is all zeros - return blank if so
+            if np.max(np.abs(self.magnetic_field)) < 1e-10:
+                print("Field is effectively zero - creating blank heatmap")
+                return heatmap
+            
+            # Calculate field magnitudes - using safe L2 norm
+            field_magnitudes = np.sqrt(np.sum(self.magnetic_field * self.magnetic_field, axis=2) + 1e-10)
+            
+            # Check if all magnitudes are very small
             max_mag = field_magnitudes.max()
-            # Use a small epsilon to prevent division by zero if field is completely flat zero
-            epsilon = 1e-9
-            if max_mag < epsilon:
-                max_mag = epsilon # Avoid division by zero
-
+            if max_mag < 1e-4:  # Use a larger threshold
+                print(f"Maximum field magnitude too small ({max_mag:.2e}) - creating blank heatmap")
+                return heatmap
+            
+            # Create a small sample version of field_magnitudes for debugging
+            sample_size = min(5, self.size)
+            sample = field_magnitudes[:sample_size, :sample_size]
+            print(f"Field magnitudes sample (first {sample_size}x{sample_size}):\n{sample}")
+            
+            # Safety check for NaN in input
+            if np.isnan(field_magnitudes).any():
+                print("NaN values in field magnitudes - cleaning up before processing")
+                field_magnitudes = np.nan_to_num(field_magnitudes, nan=0.0)
+            
+            # Bilinear interpolation with careful bounds checking
             for r in range(resolution):
                 for c in range(resolution):
-                    # Map heatmap pixel (r, c) to coil grid coordinates (grid_r, grid_c)
-                    # Ensure mapping covers the full grid range [0, size-1]
+                    # Calculate corresponding position in field array
                     grid_c = c * (self.size - 1) / (resolution - 1) if resolution > 1 else 0
                     grid_r = r * (self.size - 1) / (resolution - 1) if resolution > 1 else 0
+                    
+                    # Get integer indices and interpolation factors
                     col_idx, row_idx = int(grid_c), int(grid_r)
-
-                    # Perform bilinear interpolation using the original field_magnitudes
+                    dx, dy = grid_c - col_idx, grid_r - row_idx
+                    
+                    # Safe interpolation with bounds checking
                     if 0 <= col_idx < self.size - 1 and 0 <= row_idx < self.size - 1:
-                        dx, dy = grid_c - col_idx, grid_r - row_idx
+                        # Regular bilinear interpolation
                         f00 = field_magnitudes[row_idx, col_idx]
                         f01 = field_magnitudes[row_idx, col_idx + 1]
                         f10 = field_magnitudes[row_idx + 1, col_idx]
                         f11 = field_magnitudes[row_idx + 1, col_idx + 1]
-                        interp_top = (1 - dx) * f00 + dx * f01
-                        interp_bottom = (1 - dx) * f10 + dx * f11
-                        heatmap[r, c] = (1 - dy) * interp_top + dy * interp_bottom
+                        
+                        # Check for NaN values from a problematic magnetic_field calculation
+                        if np.isnan([f00, f01, f10, f11]).any():
+                            # If any corner is NaN, use nearest valid neighbor
+                            valid_values = [v for v in [f00, f01, f10, f11] if not np.isnan(v)]
+                            heatmap[r, c] = np.mean(valid_values) if valid_values else 0.0
+                        else:
+                            # Normal bilinear interpolation
+                            interp_top = (1 - dx) * f00 + dx * f01
+                            interp_bottom = (1 - dx) * f10 + dx * f11
+                            heatmap[r, c] = (1 - dy) * interp_top + dy * interp_bottom
                     elif 0 <= col_idx < self.size and 0 <= row_idx < self.size:
-                        # Fallback for edges: Use nearest neighbor value
+                        # Edge case - use nearest value
                         heatmap[r, c] = field_magnitudes[row_idx, col_idx]
-                    # else: leave as 0 (outside original grid)
-
-            # Normalize the interpolated heatmap data
-            heatmap /= max_mag
-
-            # Apply Gaussian filter for smoothness AFTER normalization
-            sigma_val = max(1.0, resolution / 100.0) # Sigma relative to heatmap resolution
-            heatmap = gaussian_filter(heatmap, sigma=sigma_val, order=0, mode='constant', cval=0.0)
-
-            # Clip values strictly between 0 and 1 AFTER filtering
+                    # else: leave as 0 (outside grid)
+            
+            # Normalize heatmap - with safety checks
+            max_val = heatmap.max()
+            if max_val > 1e-6:
+                heatmap /= max_val
+            else:
+                print("Warning: Maximum heatmap value too small for normalization")
+                # Return blank heatmap instead of potentially unstable values
+                return np.zeros((resolution, resolution))
+            
+            # Apply Gaussian smoothing for a nicer visualization
+            sigma_val = max(1.0, resolution / 100.0)
+            try:
+                smoothed = gaussian_filter(heatmap, sigma=sigma_val, mode='constant', cval=0.0)
+                heatmap = smoothed
+            except Exception as e:
+                print(f"Warning: Gaussian smoothing failed: {e}")
+                # Continue with unsmoothed heatmap
+            
+            # Final clipping and NaN check
             heatmap = np.clip(heatmap, 0.0, 1.0)
-
-            # Final check for NaNs (should be less likely but safe)
             if np.isnan(heatmap).any():
-                print("Warning: NaNs detected in heatmap data after final processing. Replacing with 0.")
+                print("NaN values in final heatmap - replacing with zeros")
                 heatmap = np.nan_to_num(heatmap, nan=0.0)
-
+            
             return heatmap
         except Exception as e:
             print(f"Error during heatmap generation: {e}")
-            return np.zeros((resolution, resolution)) # Return blank on error
-    # --- END REVERTED generate_heatmap ---
-
+            import traceback
+            traceback.print_exc()
+            return np.zeros((resolution, resolution))
 
     def plot_heatmap(self, filename="field_heatmap.png", figsize=(8, 8)):
-        """Generates and saves a heatmap plot using matplotlib."""
+        """Generates and saves a heatmap plot using matplotlib with enhanced reliability."""
         try:
+            # Generate heatmap data
             heatmap_data = self.generate_heatmap()
-            if heatmap_data is None: return None
-
+            if heatmap_data is None:
+                print("Failed to generate heatmap data")
+                return None
+            
+            # Check if heatmap is all zeros
+            if np.max(heatmap_data) < 1e-6:
+                print("Heatmap is effectively blank, but continuing with visualization")
+                # Instead of returning None, we'll still create a blue visualization
+            
+            # Create plot
             plt.figure(figsize=figsize)
-            cmap = plt.cm.jet # Use 'jet' colormap as preferred
-            im = plt.imshow(heatmap_data, cmap=cmap, aspect='equal', origin='upper', interpolation='bilinear', vmin=0.0, vmax=1.0)
+            
+            # Use plasma colormap (blues for low values, reds for high)
+            # Alternative colormaps: 'viridis', 'jet', 'hot', 'magma'
+            cmap = plt.cm.plasma
+            
+            # Plot the heatmap
+            im = plt.imshow(
+                heatmap_data, 
+                cmap=cmap, 
+                aspect='equal', 
+                origin='upper', 
+                interpolation='bilinear', 
+                vmin=0.0, 
+                vmax=1.0
+            )
+            
+            # Add colorbar and labels
             plt.colorbar(im, label='Normalized Field Strength')
-            plt.xticks([]); plt.yticks([])
+            plt.xticks([])
+            plt.yticks([])
             plt.tight_layout()
-            plt.savefig(filename, dpi=150)
-            plt.close()
-            return filename
+            
+            # Save to file with error handling
+            try:
+                plt.savefig(filename, dpi=150)
+                plt.close()
+                
+                # Verify file was created successfully
+                if os.path.exists(filename) and os.path.getsize(filename) > 0:
+                    return filename
+                else:
+                    print(f"Warning: Heatmap file {filename} not created or empty")
+                    return None
+            except Exception as e:
+                print(f"Error saving heatmap to file: {e}")
+                plt.close()
+                return None
         except Exception as e:
-            print(f"Error generating or saving heatmap plot: {e}")
+            print(f"Error in heatmap plotting: {e}")
+            import traceback
+            traceback.print_exc()
             if os.path.exists(filename):
                 try: os.remove(filename)
                 except OSError: pass
