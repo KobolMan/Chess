@@ -58,7 +58,7 @@ class ChessBoard:
                  debug_mode=False, initial_window_size=None):
         self.hardware_controller = hardware_controller
         self.debug_mode = debug_mode # Use constructor arg
-
+    
         # --- Window Setup ---
         if initial_window_size:
             self.window_width, self.window_height = initial_window_size
@@ -66,7 +66,7 @@ class ChessBoard:
         else:
             self.window_width, self.window_height = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
             print(f"Using default size: {self.window_width}x{self.window_height}")
-
+    
         # Create the display surface with RESIZABLE flag
         # SCALED can sometimes cause issues with widget positioning or rendering, try without first
         try:
@@ -77,16 +77,16 @@ class ChessBoard:
         except Exception as e:
             print(f"Error setting Pygame display mode: {e}. Exiting.")
             sys.exit(1)
-
+    
         # Get final actual size after mode set
         self.window_width, self.window_height = self.screen.get_size()
         print(f"Final actual window size: {self.window_width}x{self.window_height}")
-
+    
         pygame.display.set_caption("Electromagnetic Chess Simulation (PID Tuning)")
-
+    
         # Initialize sizes based on actual window size
         self._calculate_layout(self.window_width, self.window_height)
-
+    
         # Initialize components
         self.renderer = ChessRenderer(
             self.board_size_px, BOARD_SQUARES,
@@ -168,6 +168,26 @@ class ChessBoard:
         """Prints the currently active PID settings."""
         print(f"--- {context} PID GAINS: Kp={self.pid_kp:.1f}, Ki={self.pid_ki:.1f}, Kd={self.pid_kd:.1f}, TermDamp={self.terminal_damping:.1f}, Imax={self.pid_integral_max:.1f} ---")
 
+    def _center_window(self, width, height):
+        """Center the pygame window on the screen."""
+        # Get the screen information
+        info = pygame.display.Info()
+        screen_width = info.current_w
+        screen_height = info.current_h
+
+        # Calculate the center position
+        pos_x = (screen_width - width) // 2
+        pos_y = (screen_height - height) // 2
+
+        # Ensure position is not negative (can happen with multi-monitor setups)
+        pos_x = max(0, pos_x)
+        pos_y = max(0, pos_y)
+
+        print(f"Centering window at position: ({pos_x}, {pos_y})")
+
+        # Set the window position using SDL environment variable
+        os.environ['SDL_VIDEO_WINDOW_POS'] = f"{pos_x},{pos_y}"
+
     def _calculate_layout(self, window_width, window_height):
         """ Recalculates layout based on current window size. """
         self.window_width = window_width
@@ -247,18 +267,29 @@ class ChessBoard:
                 # print(f"Warning: Error updating slider textboxes: {e}")
                 pass
 
+    # Add window repositioning to the handle_resize method
+# Find the handle_resize method and update it to include centering
+
     def handle_resize(self, new_width, new_height):
         """
-        Handle window resize events with enhanced debounce logic and
-        multi-monitor support.
+        Handle window resize events with robust error handling and
+        multi-monitor support. Avoids SDL renderer creation failures.
         """
-        # Ignore invalid sizes or extremes (likely transitioning between displays)
-        if new_width <= 100 or new_height <= 100 or new_width > 10000 or new_height > 10000:
+        # Ignore invalid sizes
+        if new_width <= 100 or new_height <= 100:
             return
-        
+
+        # Apply reasonable limits to prevent renderer creation failures
+        max_width = 3000  # Practical limit to prevent issues
+        max_height = 1600  # Practical limit to prevent issues
+        if new_width > max_width or new_height > max_height:
+            new_width = min(new_width, max_width)
+            new_height = min(new_height, max_height)
+            print(f"Limiting resize dimensions to {new_width}x{new_height}")
+
         # Get current time for debounce calculations
         current_time = time.time()
-        
+
         # Initialize debounce tracking attributes if needed
         if not hasattr(self, '_last_resize_time'):
             self._last_resize_time = 0
@@ -268,7 +299,7 @@ class ChessBoard:
             self._resize_settling = False
         if not hasattr(self, '_resize_cooldown'):
             self._resize_cooldown = 0.5  # Seconds to wait after major resize
-        
+
         # Skip if in settling period after major size change
         if self._resize_settling:
             if current_time - self._last_resize_time < self._resize_cooldown:
@@ -276,12 +307,12 @@ class ChessBoard:
             else:
                 # End of settling period
                 self._resize_settling = False
-        
+
         # Detect if this is a significant change (likely moving between monitors)
         last_width, last_height = self._last_resize_dims
         width_change = abs(new_width - last_width) / max(last_width, 1)
         height_change = abs(new_height - last_height) / max(last_height, 1)
-        
+
         if width_change > 0.2 or height_change > 0.2:  # 20% change indicates major resize
             # Major resize detected - likely moving between monitors
             # Enter settling period where small adjustments are ignored
@@ -291,52 +322,80 @@ class ChessBoard:
             print(f"Major resize detected: {new_width}x{new_height}")
         else:
             # Normal resize behavior with debouncing
-            
+
             # Skip if resize happens too quickly after previous resize
             if current_time - self._last_resize_time < 0.3:  # 300ms debounce
                 return
-            
+
             # Skip if dimensions haven't changed much
             if abs(new_width - last_width) < 10 and abs(new_height - last_height) < 10:
                 return
-        
+
         # Update tracking variables
         self._last_resize_time = current_time
         self._last_resize_dims = (new_width, new_height)
-        
+
         print(f"Applying resize to {new_width}x{new_height}")
-        
+
         # *** Actual resize logic begins here ***
         # Recalculate layout
         self._calculate_layout(new_width, new_height)
-        
-        # Recreate screen surface
+
+        # For major size changes, set centered environment variable
+        if width_change > 0.2 or height_change > 0.2:
+            os.environ['SDL_VIDEO_CENTERED'] = '1'
+
+        # Recreate screen surface with error handling
         try:
-            # Use SCALED flag for better handling of high DPI displays
+            # Try without SCALED flag first - more compatible across systems
             self.screen = pygame.display.set_mode(
                 (self.window_width, self.window_height), 
-                pygame.RESIZABLE | pygame.SCALED
+                pygame.RESIZABLE
             )
         except pygame.error as e:
             print(f"Error resizing display: {e}")
-            return
-            
+            try:
+                # Fall back to even more basic window if first attempt fails
+                print("Trying fallback resize approach...")
+                # Use smaller dimensions if needed
+                fallback_width = min(self.window_width, 1200)
+                fallback_height = min(self.window_height, 800)
+
+                # Try to center again
+                os.environ['SDL_VIDEO_CENTERED'] = '1'
+
+                self.screen = pygame.display.set_mode(
+                    (fallback_width, fallback_height),
+                    pygame.RESIZABLE
+                )
+                # Update layout for the fallback size
+                self._calculate_layout(fallback_width, fallback_height)
+                print(f"Using fallback window size: {fallback_width}x{fallback_height}")
+            except pygame.error as e2:
+                print(f"Fallback resize also failed: {e2}")
+                return
+
         # Update renderer
-        self.renderer = ChessRenderer(
-            self.board_size_px, BOARD_SQUARES,
-            self.window_width, self.window_height,
-            board_x_offset=self.board_x_offset,
-            heatmap_size_px=self.heatmap_size_px
-        )
-        
-        # Update square size for pieces
-        for piece in self.pieces: 
-            piece.square_size = self.square_size_px
-            
-        # Recreate sliders AFTER renderer (uses renderer colors)
-        self._create_pid_sliders()
-        self.heatmap_surface = None
-        self.heatmap_needs_update = True
+        try:
+            self.renderer = ChessRenderer(
+                self.board_size_px, BOARD_SQUARES,
+                self.window_width, self.window_height,
+                board_x_offset=self.board_x_offset,
+                heatmap_size_px=self.heatmap_size_px
+            )
+
+            # Update square size for pieces
+            for piece in self.pieces: 
+                piece.square_size = self.square_size_px
+
+            # Recreate sliders AFTER renderer (uses renderer colors)
+            self._create_pid_sliders()
+            self.heatmap_surface = None
+            self.heatmap_needs_update = True
+        except Exception as e:
+            print(f"Error recreating renderer: {e}")
+            import traceback
+            traceback.print_exc()
 
     def initialize_pieces(self):
         """Sets up the pieces in their starting positions."""

@@ -5,8 +5,8 @@ print("DEBUG: Starting main.py script...")
 
 import sys
 import argparse
-import pygame # Keep pygame import if needed for quit/exceptions
-import os
+import os  # Required for SDL environment variables
+import pygame
 
 print("DEBUG: Basic imports done.")
 
@@ -84,17 +84,16 @@ def main():
 
     print(f"DEBUG: Hardware controller ready (sim_mode={sim_mode}).")
 
-    # --- Initialize Pygame (before getting display info) ---
+    # --- Set Initial Window Size and Center Window ---
     try:
+        # Set the SDL environment variable to center the window BEFORE pygame initialization
+        os.environ['SDL_VIDEO_CENTERED'] = '1'
+        print("Window set to centered mode")
+        
         print("DEBUG: Initializing Pygame...")
         pygame.init()
         print("DEBUG: Pygame initialized.")
-    except Exception as e:
-        print(f"FATAL: Error initializing Pygame: {e}")
-        sys.exit(1)
-
-    # --- Set Initial Window Size (Attempt Fullscreen Windowed) ---
-    try:
+        
         display_info = pygame.display.Info()
         initial_width = display_info.current_w
         initial_height = display_info.current_h
