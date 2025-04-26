@@ -58,7 +58,7 @@ class ChessBoard:
                  debug_mode=False, initial_window_size=None):
         self.hardware_controller = hardware_controller
         self.debug_mode = debug_mode # Use constructor arg
-    
+
         # --- Window Setup ---
         if initial_window_size:
             self.window_width, self.window_height = initial_window_size
@@ -66,27 +66,26 @@ class ChessBoard:
         else:
             self.window_width, self.window_height = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
             print(f"Using default size: {self.window_width}x{self.window_height}")
-    
+
         # Create the display surface with RESIZABLE flag
-        # SCALED can sometimes cause issues with widget positioning or rendering, try without first
         try:
-             self.screen = pygame.display.set_mode(
-                 (self.window_width, self.window_height),
-                 pygame.RESIZABLE # Start without SCALED unless needed
-             )
+            self.screen = pygame.display.set_mode(
+                (self.window_width, self.window_height),
+                pygame.RESIZABLE # Start without SCALED unless needed
+            )
         except Exception as e:
             print(f"Error setting Pygame display mode: {e}. Exiting.")
             sys.exit(1)
-    
+
         # Get final actual size after mode set
         self.window_width, self.window_height = self.screen.get_size()
         print(f"Final actual window size: {self.window_width}x{self.window_height}")
-    
-        pygame.display.set_caption("Electromagnetic Chess Simulation (PID Tuning)")
-    
+
+        pygame.display.set_caption("Smart Chessboard Simulation")
+
         # Initialize sizes based on actual window size
         self._calculate_layout(self.window_width, self.window_height)
-    
+
         # Initialize components
         self.renderer = ChessRenderer(
             self.board_size_px, BOARD_SQUARES,
@@ -98,13 +97,13 @@ class ChessBoard:
         self.path_finder = PathFinder(board_size=BOARD_SQUARES)
 
         # --- PID GAINS (Iteration 3) ---
-        self.pid_kp = 80.0  # Updated from 50.0
-        self.pid_ki = 0.2   # Updated from 5.0
-        self.pid_kd = 44.0  # Updated from 50.0
-        self.terminal_damping = 5.0  # Keeping this value
-        self.pid_integral_max = 40.0  # Keeping this value
-        
-        # Also update the temporary values to match
+        self.pid_kp = 80.0
+        self.pid_ki = 0.2
+        self.pid_kd = 44.0
+        self.terminal_damping = 5.0
+        self.pid_integral_max = 40.0
+
+        # Temporary values controlled by sliders
         self.temp_pid_kp = self.pid_kp
         self.temp_pid_ki = self.pid_ki
         self.temp_pid_kd = self.pid_kd
@@ -136,9 +135,10 @@ class ChessBoard:
         self.show_coils = False
         self.show_field = False
         self.show_paths = True
-        self.show_heatmap = True
+        self.show_heatmap = False  # Start with heatmap disabled
         self.show_center_markers = False
         self.renderer.show_position_dots = True
+        self.board_y_offset = 0  # Initialize vertical offset
 
         # Move Pattern Options (for viz/hardware)
         self.current_pattern="directed"
@@ -151,6 +151,7 @@ class ChessBoard:
         self.clock = pygame.time.Clock()
         self.heatmap_surface = None
         self.heatmap_needs_update = True
+        self.heatmap_window = None  # Initialize separate window reference
 
         # --- Initialize PID Sliders ---
         self.pid_sliders = {}
@@ -193,25 +194,36 @@ class ChessBoard:
         self.window_width = window_width
         self.window_height = window_height
 
-        available_width = self.window_width - SIDE_PANEL_WIDTH
-        # Keep board and heatmap square and roughly equal, leaving space for panel
+        # Constants for layout
+        self.SIDE_PANEL_WIDTH = 250  # Width for captured pieces panel
+
+        # Use most of available width for the board, keep it square
+        available_width = self.window_width - self.SIDE_PANEL_WIDTH
         board_size = min(
-            available_width // 2,       # Half available width
-            self.window_height - 100    # Fit vertically with margin
+            available_width,              # Full width minus panel
+            self.window_height            # Or full height
         )
+
         # Ensure board size is multiple of squares and has min size
-        board_size = max(BOARD_SQUARES * 20, (board_size // BOARD_SQUARES) * BOARD_SQUARES) # Min size 20px/square
+        board_size = max(BOARD_SQUARES * 20, (board_size // BOARD_SQUARES) * BOARD_SQUARES)  # Min size 20px/square
 
         self.board_size_px = board_size
-        self.heatmap_size_px = board_size # Keep them same size
         self.square_size_px = board_size // BOARD_SQUARES
 
-        # Heatmap on left, board next to it
-        self.board_x_offset = self.heatmap_size_px
-        # Panel starts after the board
+        # Board is positioned at left
+        self.board_x_offset = 0
+
+        # Captured pieces panel starts after the board
         self.panel_x = self.board_x_offset + self.board_size_px
 
-        # print(f"Layout Recalculated: Win={window_width}x{window_height}, Board/Heatmap={board_size}px, PanelX={self.panel_x}")
+        # Remove heatmap size calculation since it will be in separate window
+        self.heatmap_size_px = board_size  # Keep this for now to avoid breaking code
+
+        # Center the board vertically if needed
+        self.board_y_offset = (self.window_height - self.board_size_px) // 2
+        if self.board_y_offset < 0:
+            self.board_y_offset = 0
+            # print(f"Layout Recalculated: Win={window_width}x{window_height}, Board/Heatmap={board_size}px, PanelX={self.panel_x}")
 
     def _create_pid_sliders(self):
         """Creates the PID slider widgets."""
@@ -247,6 +259,112 @@ class ChessBoard:
         self.pid_textboxes['kd'].disable()
 
         self._update_slider_textboxes() # Set initial text
+
+    def _create_heatmap_window(self):
+        """Creates a separate window for the heatmap."""
+        try:
+            # Get the position for the heatmap window (right of main window)
+            main_window_x = pygame.display.get_wm_info()["window"]
+
+            # Determine heatmap window size (same as board for square heatmap)
+            heatmap_width = self.board_size_px
+            heatmap_height = self.board_size_px
+
+            # Create heatmap window
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.window_width + 10},{self.board_y_offset}"  # Position right of main window
+            heatmap_window = pygame.display.set_mode(
+                (heatmap_width, heatmap_height),
+                pygame.NOFRAME,  # No window frame
+                pygame.WINDOWPOS_RELATED,  # Relate to main window
+                pygame.display.get_wm_info()["window"]
+            )
+
+            # Store the window and its info
+            self.heatmap_window = {
+                'surface': heatmap_window,
+                'width': heatmap_width,
+                'height': heatmap_height
+            }
+
+            # Set window title
+            pygame.display.set_caption("Magnetic Field Heatmap")
+
+            return True
+        except Exception as e:
+            print(f"Error creating heatmap window: {e}")
+            import traceback
+            traceback.print_exc()
+            self.heatmap_window = None
+            return False
+
+    def _close_heatmap_window(self):
+        """Closes the separate heatmap window."""
+        if hasattr(self, 'heatmap_window') and self.heatmap_window:
+            try:
+                # Return to single display mode
+                pygame.display.quit()
+                pygame.display.init()
+
+                # Recreate main window
+                os.environ['SDL_VIDEO_CENTERED'] = '1'
+                self.screen = pygame.display.set_mode(
+                    (self.window_width, self.window_height),
+                    pygame.RESIZABLE
+                )
+
+                self.heatmap_window = None
+                return True
+            except Exception as e:
+                print(f"Error closing heatmap window: {e}")
+                return False
+
+    def toggle_heatmap(self):
+        """Toggles the heatmap visualization."""
+        self.show_heatmap = not self.show_heatmap
+
+        if self.show_heatmap:
+            # If turning on, create the heatmap window if it doesn't exist
+            if not hasattr(self, 'heatmap_window') or not self.heatmap_window:
+                if not self._create_heatmap_window():
+                    self.show_heatmap = False
+                    return
+            self.heatmap_needs_update = True
+        else:
+            # If turning off, close the heatmap window
+            if hasattr(self, 'heatmap_window') and self.heatmap_window:
+                self._close_heatmap_window()
+
+    def update_heatmap_window(self):
+        """Updates the separate heatmap window with the current heatmap."""
+        if self.show_heatmap and hasattr(self, 'heatmap_window') and self.heatmap_window:
+            if self.heatmap_needs_update or self.heatmap_surface is None:
+                self.load_heatmap()
+
+            # Fill with background color
+            self.heatmap_window['surface'].fill(self.renderer.DARK_GRAY)
+
+            # Draw the heatmap in the center
+            if self.heatmap_surface:
+                target_w = self.heatmap_window['width']
+                target_h = self.heatmap_window['height']
+
+                # Resize if needed to fit window
+                if self.heatmap_surface.get_width() != target_w or self.heatmap_surface.get_height() != target_h:
+                    try:
+                        self.heatmap_surface = pygame.transform.smoothscale(self.heatmap_surface, (target_w, target_h))
+                    except Exception as e:
+                        print(f"Error scaling heatmap for window: {e}")
+
+                # Draw the heatmap
+                self.heatmap_window['surface'].blit(self.heatmap_surface, (0, 0))
+
+                # Add title
+                title_text = self.renderer.small_font.render("Magnetic Field Strength Heatmap", True, self.renderer.WHITE)
+                title_rect = title_text.get_rect(center=(target_w // 2, 20))
+                self.heatmap_window['surface'].blit(title_text, title_rect)
+
+                # Update the display
+                pygame.display.update()
 
     def _update_slider_textboxes(self):
         """Updates the text boxes next to sliders with current temp values."""
@@ -683,7 +801,7 @@ class ChessBoard:
         while running:
             dt_sec = min(self.clock.tick(FPS) / 1000.0, 0.1)
             events = pygame.event.get()
-
+    
             # --- Update Widgets First ---
             if WIDGETS_AVAILABLE:
                 # Update widget states based on events
@@ -691,26 +809,27 @@ class ChessBoard:
                 pygame_widgets.update(events)
                 # Update internal temp values and textbox displays AFTER processing events
                 self._update_slider_textboxes()
-
+    
             # --- Handle Game Events ---
             for event in events:
-                if event.type == pygame.QUIT: running = False
+                if event.type == pygame.QUIT: 
+                    running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     # Check if the click was handled by a widget; if not, process board click
                     # Note: pygame_widgets doesn't easily provide a 'handled' flag.
                     # We rely on checking coordinates in handle_click.
                     if event.button == 1:
-                         self.handle_click(event.pos)
-                    # Add right-click to cancel selection
+                        self.handle_click(event.pos)
+                    # Right-click to cancel selection
                     elif event.button == 3:  # Right mouse button
-                         if self.selected_piece:
-                             print("Selection canceled (right-click).")
-                             self.selected_piece = None
-                             self.target_position = None
-                             self.temporarily_moved_pieces = []
-                             # Return pieces moved aside during clearance to original positions
-                             for piece in self.temporarily_moved_pieces:
-                                 piece.return_from_temporary_move()
+                        if self.selected_piece:
+                            print("Selection canceled (right-click).")
+                            self.selected_piece = None
+                            self.target_position = None
+                            self.temporarily_moved_pieces = []
+                            # Return pieces moved aside during clearance to original positions
+                            for piece in self.temporarily_moved_pieces:
+                                piece.return_from_temporary_move()
                 elif event.type == pygame.KEYDOWN:
                     key = event.key
                     if key == pygame.K_r: self.reset()
@@ -720,7 +839,8 @@ class ChessBoard:
                     elif key == pygame.K_c: self.show_coils = not self.show_coils
                     elif key == pygame.K_f: self.show_field = not self.show_field
                     elif key == pygame.K_p: self.show_paths = not self.show_paths
-                    elif key == pygame.K_h: self.show_heatmap = not self.show_heatmap; self.heatmap_needs_update = True # Force regen on toggle
+                    # Use the new toggle_heatmap method to handle heatmap window
+                    elif key == pygame.K_h: self.toggle_heatmap()
                     elif key == pygame.K_d: self.debug_mode = not self.debug_mode; print(f"Debug mode: {self.debug_mode}")
                     elif key == pygame.K_x: self.show_center_markers = not self.show_center_markers; print(f"Center markers: {self.show_center_markers}")
                     elif key == pygame.K_y: self.renderer.show_position_dots = not self.renderer.show_position_dots; print(f"Position dots: {self.renderer.show_position_dots}")
@@ -736,57 +856,90 @@ class ChessBoard:
                                 piece.return_from_temporary_move()
                         else:
                             running = False  # Only quit if no selection active
-                elif event.type == pygame.VIDEORESIZE: self.handle_resize(event.w, event.h)
-
+                elif event.type == pygame.VIDEORESIZE: 
+                    self.handle_resize(event.w, event.h)
+    
             # --- Update Simulation Logic ---
             self.update_move(dt_sec)
-
+    
             # --- Drawing ---
             self.screen.fill(self.renderer.DARK_GRAY)
-            # Heatmap
-            if self.show_heatmap: self.load_heatmap(); self.renderer.draw_heatmap_beside_board(self.screen, self.heatmap_surface)
-            else: self.renderer.draw_heatmap_beside_board(self.screen, None)
+            
             # Board
-            self.renderer.draw_board(self.screen)
+            self.renderer.draw_board(self.screen, y_offset=self.board_y_offset)
+            
             # Optional Center Markers
             if self.show_center_markers:
                 for row in range(BOARD_SQUARES):
                     for col in range(BOARD_SQUARES):
-                        px, py = self.renderer.board_to_pixel((col, row))
+                        px, py = self.renderer.board_to_pixel((col, row), y_offset=self.board_y_offset)
                         self.renderer.draw_center_marker(self.screen, px, py)
+            
             # Optional Coil/Field Viz
-            if self.show_coils: self.coil_grid.draw(self.screen, self.board_size_px, x_offset=self.board_x_offset)
-            if self.show_field: self.coil_grid.draw_field_overlay(self.screen, self.board_size_px, x_offset=self.board_x_offset)
+            if self.show_coils: 
+                self.coil_grid.draw(self.screen, self.board_size_px, 
+                                   x_offset=self.board_x_offset, 
+                                   y_offset=self.board_y_offset)
+            
+            if self.show_field: 
+                self.coil_grid.draw_field_overlay(self.screen, self.board_size_px, 
+                                                x_offset=self.board_x_offset, 
+                                                y_offset=self.board_y_offset)
+            
             # Paths
-            if self.show_paths: self.renderer.draw_paths(self.screen, self.pieces, self.selected_piece)
+            if self.show_paths: 
+                self.renderer.draw_paths(self.screen, self.pieces, self.selected_piece, 
+                                       y_offset=self.board_y_offset)
+            
             # Pieces
-            self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece)
-            # Control Panel & Capture Area
+            self.renderer.draw_pieces(self.screen, self.pieces, self.selected_piece, 
+                                    y_offset=self.board_y_offset)
+            
+            # Captured Pieces Panel
+            self.renderer.draw_captured_pieces_panel(self.screen, self.captured_white, 
+                                                  self.captured_black, 
+                                                  self.panel_x, self.window_height)
+    
+            # Control Panel & Info
             info_dict = {
-                'selected_piece': self.selected_piece, 'target_position': self.target_position if self.move_in_progress else None,
-                'move_in_progress': self.move_in_progress, 'move_complete': self.move_complete,
-                'show_coils': self.show_coils, 'show_field': self.show_field, 'show_paths': self.show_paths,
-                'show_heatmap': self.show_heatmap, 'show_center_markers': self.show_center_markers,
-                'current_pattern': self.current_pattern, 'simulation_speed': self.simulation_speed,
-                'debug_mode': self.debug_mode, 'pid_gains_active': (self.pid_kp, self.pid_ki, self.pid_kd),
-                'pid_gains_temp': (self.temp_pid_kp, self.temp_pid_ki, self.temp_pid_kd), # Pass temp values too
-                'pid_force_mag': self.last_move_pid_force_mag, 'sim_current_amps': self.current_total_sim_amps,
-                'captured_white': self.captured_white, 'captured_black': self.captured_black,
+                'selected_piece': self.selected_piece, 
+                'target_position': self.target_position if self.move_in_progress else None,
+                'move_in_progress': self.move_in_progress, 
+                'move_complete': self.move_complete,
+                'show_coils': self.show_coils, 
+                'show_field': self.show_field, 
+                'show_paths': self.show_paths,
+                'show_heatmap': self.show_heatmap, 
+                'show_center_markers': self.show_center_markers,
+                'current_pattern': self.current_pattern, 
+                'simulation_speed': self.simulation_speed,
+                'debug_mode': self.debug_mode, 
+                'pid_gains_active': (self.pid_kp, self.pid_ki, self.pid_kd),
+                'pid_gains_temp': (self.temp_pid_kp, self.temp_pid_ki, self.temp_pid_kd), 
+                'pid_force_mag': self.last_move_pid_force_mag, 
+                'sim_current_amps': self.current_total_sim_amps,
+                'captured_white': self.captured_white, 
+                'captured_black': self.captured_black,
             }
-            # Draw panel background and text info FIRST
-            self.renderer.draw_controls(self.screen, info_dict, panel_x=self.panel_x, sliders_active=WIDGETS_AVAILABLE)
-
+    
             # --- Explicitly Draw Widgets (Needed!) ---
-            # Widgets need to be drawn after their background surface is drawn.
-            # pygame_widgets.update handles events, but drawing is often separate.
-            # This should make the sliders appear on top of the panel background.
+            # Widgets need to be drawn after their background surface is drawn
             if WIDGETS_AVAILABLE:
-                 # Manually redraw widgets on the main screen surface each frame
-                 # This assumes widgets were created with self.screen
-                 for slider in self.pid_sliders.values(): slider.draw()
-                 for textbox in self.pid_textboxes.values(): textbox.draw()
-
-            pygame.display.flip() # Update screen
-            if self.move_complete: self.move_complete = False # Reset flag
-
+                # Manually redraw widgets on the main screen surface each frame
+                for slider in self.pid_sliders.values(): slider.draw()
+                for textbox in self.pid_textboxes.values(): textbox.draw()
+    
+            # Update the separate heatmap window if active
+            if self.show_heatmap:
+                self.update_heatmap_window()
+    
+            pygame.display.flip() # Update main screen
+            
+            if self.move_complete: 
+                self.move_complete = False # Reset flag
+    
+        # When exiting the loop, make sure to close the heatmap window if it exists
+        if hasattr(self, 'heatmap_window') and self.heatmap_window:
+            self._close_heatmap_window()
+            
         print("Simulation loop ended.")

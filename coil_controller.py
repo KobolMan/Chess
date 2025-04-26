@@ -254,7 +254,7 @@ class CoilGrid:
         total_amps = np.sum(active_powers / 100.0 * MAX_COIL_AMPS)
         return total_amps
 
-    def draw(self, surface, board_pixel_size, x_offset=0):
+    def draw(self, surface, board_pixel_size, x_offset=0, y_offset=0):
         """Draws the coil grid visualization onto the provided surface."""
         coil_pixel_size = board_pixel_size / self.size
         coil_surface = pygame.Surface((board_pixel_size, board_pixel_size), pygame.SRCALPHA)
@@ -269,31 +269,30 @@ class CoilGrid:
                     color = (255, 100, 100, alpha) if current > 0 else (100, 100, 255, alpha)
                     radius = int(coil_pixel_size / 2 * 0.7 * (0.6 + 0.4 * power / 100))
                     pygame.draw.circle(coil_surface, color, (int(x), int(y)), radius)
-        surface.blit(coil_surface, (x_offset, 0))
-
-    def draw_field_overlay(self, surface, board_pixel_size, resolution=20, x_offset=0):
+        surface.blit(coil_surface, (x_offset, y_offset))
+    
+    
+    def draw_field_overlay(self, surface, board_pixel_size, resolution=20, x_offset=0, y_offset=0):
         """Draws the calculated magnetic field vectors as arrows."""
         step_size = board_pixel_size / resolution
         field_surface = pygame.Surface((board_pixel_size, board_pixel_size), pygame.SRCALPHA)
         field_magnitudes = np.linalg.norm(self.magnetic_field, axis=2)
         max_field_strength_observed = field_magnitudes.max() if field_magnitudes.max() > 1e-6 else 1.0
-
+    
         for r_idx in range(resolution):
             for c_idx in range(resolution):
                 x_pix = c_idx * step_size + step_size / 2
                 y_pix = r_idx * step_size + step_size / 2
                 col_grid = c_idx * (self.size / resolution) + (self.size / resolution / 2)
                 row_grid = r_idx * (self.size / resolution) + (self.size / resolution / 2)
-
+    
                 col_int = int(col_grid)
                 row_int = int(row_grid)
-                # --- FIX: Calculate BOTH dx and dy ---
                 dx = col_grid - col_int
                 dy = row_grid - row_int
-                # --- -------------------------- ---
-
+    
                 if not (0 <= col_int < self.size - 1 and 0 <= row_int < self.size - 1): continue
-
+    
                 # Interpolate field vector at this point
                 field_00=self.magnetic_field[row_int, col_int]; field_01=self.magnetic_field[row_int, col_int + 1]
                 field_10=self.magnetic_field[row_int + 1, col_int]; field_11=self.magnetic_field[row_int + 1, col_int + 1]
@@ -302,7 +301,7 @@ class CoilGrid:
                 field_vec = np.array([field_x, field_y])
                 field_strength = np.linalg.norm(field_vec)
                 min_draw_strength = 0.01 * max_field_strength_observed
-
+    
                 if field_strength > min_draw_strength:
                     # Arrow drawing logic
                     field_normalized = field_vec / field_strength
@@ -321,7 +320,7 @@ class CoilGrid:
                         p3 = (end_x - head_length * math.cos(angle + math.pi / 6), end_y - head_length * math.sin(angle + math.pi / 6))
                         try: poly_points = [(int(p[0]), int(p[1])) for p in [p1, p2, p3]]; pygame.draw.polygon(field_surface, arrow_color, poly_points)
                         except ValueError: pass
-        surface.blit(field_surface, (x_offset, 0))
+        surface.blit(field_surface, (x_offset, y_offset))
 
     def generate_heatmap(self, resolution=200):
         """

@@ -16,16 +16,16 @@ except ImportError:
 class ChessRenderer:
     """Handles all Pygame rendering for the chess simulation."""
 
-    def __init__(self, board_size_px, squares, window_width, window_height, board_x_offset, heatmap_size_px): # Added heatmap_size_px
+    def __init__(self, board_size_px, squares, window_width, window_height, board_x_offset, heatmap_size_px):
         self.board_size_px = board_size_px
         self.squares = squares
         self.square_size_px = board_size_px // squares
         self.window_width = window_width
         self.window_height = window_height
-        self.board_x_offset = board_x_offset # Board's X position offset for heatmap
-        self.heatmap_size_px = heatmap_size_px # Store heatmap size
-        self.panel_x = board_x_offset + board_size_px # Default panel start X
-
+        self.board_x_offset = board_x_offset
+        self.heatmap_size_px = heatmap_size_px
+        self.panel_x = board_x_offset + board_size_px
+    
         # Colors
         self.WHITE = (255, 255, 255)
         self.BLACK = (0, 0, 0)
@@ -36,43 +36,41 @@ class ChessRenderer:
         self.ORANGE = (255, 165, 0)
         self.LIGHT_SQUARE = (240, 217, 181)
         self.DARK_SQUARE = (181, 136, 99)
-        self.LIGHT_GRAY = (211, 211, 211) # Lighter gray for panel
-        self.DARK_GRAY = (100, 100, 100)
-        self.HIGHLIGHT = (124, 252, 0) # Green highlight for selection
-        self.PATH_COLOR = (0, 0, 255, 150) # Blueish semi-transparent for path
-        self.SEL_PATH_COLOR = (0, 255, 0, 150) # Greenish semi-transparent for selected path
-        self.CAPTURE_PATH_COLOR = (255, 0, 0, 150) # Reddish semi-transparent for capture path
-        self.CENTER_MARKER_COLOR = (255, 0, 255) # Magenta for center markers
-        self.POSITION_DOT_COLOR = (255, 0, 0) # Red for mathematical position indicators
-
+        self.LIGHT_GRAY = (211, 211, 211)
+        self.DARK_GRAY = (50, 50, 50)  # Darker gray for better contrast
+        self.HIGHLIGHT = (124, 252, 0)
+        self.PATH_COLOR = (0, 0, 255, 150)
+        self.SEL_PATH_COLOR = (0, 255, 0, 150)
+        self.CAPTURE_PATH_COLOR = (255, 0, 0, 150)
+        self.CENTER_MARKER_COLOR = (255, 0, 255)
+        self.POSITION_DOT_COLOR = (255, 0, 0)
+    
         # Initialize fonts
         try:
-            pygame.font.init() # Ensure font module is initialized
-            self.font = pygame.font.SysFont('segoeui', 24) # Main font
-            self.small_font = pygame.font.SysFont('segoeui', 18) # Smaller font for panel info
-            self.very_small_font = pygame.font.SysFont('segoeui', 14) # For labels like slider names
-            self.coord_font = pygame.font.SysFont('consolas', 12) # Tiny font for coords
-            # Piece font created dynamically
+            pygame.font.init()
+            self.font = pygame.font.SysFont('segoeui', 24)
+            self.small_font = pygame.font.SysFont('segoeui', 18)
+            self.very_small_font = pygame.font.SysFont('segoeui', 14)
+            self.coord_font = pygame.font.SysFont('consolas', 12)
         except pygame.error as e:
             print(f"Font Error: {e}. Using default fonts.")
             self.font = pygame.font.Font(None, 30)
             self.small_font = pygame.font.Font(None, 24)
             self.very_small_font = pygame.font.Font(None, 20)
             self.coord_font = pygame.font.Font(None, 16)
-
+    
         self.show_position_dots = True  # Default to True for better debugging
 
-
-    def draw_board(self, surface):
+    def draw_board(self, surface, y_offset=0):
         """Draw the chessboard grid and labels."""
         # Draw squares
         for r in range(self.squares):
             for c in range(self.squares):
                 color = self.LIGHT_SQUARE if (r + c) % 2 == 0 else self.DARK_SQUARE
                 pygame.draw.rect(surface, color,
-                                 (c * self.square_size_px + self.board_x_offset,
-                                  r * self.square_size_px,
-                                  self.square_size_px, self.square_size_px))
+                                (c * self.square_size_px + self.board_x_offset,
+                                 r * self.square_size_px + y_offset,
+                                 self.square_size_px, self.square_size_px))
 
         # Draw rank/file labels (use smaller font)
         label_color = self.WHITE
@@ -80,11 +78,11 @@ class ChessRenderer:
             # Files (a-h) below board
             file_txt = self.very_small_font.render(chr(ord('a') + i), True, label_color)
             file_rect = file_txt.get_rect(center=(i * self.square_size_px + self.square_size_px // 2 + self.board_x_offset,
-                                                  self.board_size_px + 10)) # Closer to board
+                                                  self.board_size_px + 10 + y_offset)) # Closer to board
             surface.blit(file_txt, file_rect)
             # Ranks (1-8) left of board
             rank_txt = self.very_small_font.render(str(self.squares - i), True, label_color) # 8 at top
-            rank_rect = rank_txt.get_rect(center=(self.board_x_offset - 10, i * self.square_size_px + self.square_size_px // 2))
+            rank_rect = rank_txt.get_rect(center=(self.board_x_offset - 10, i * self.square_size_px + self.square_size_px // 2 + y_offset))
             surface.blit(rank_txt, rank_rect)
 
     def draw_center_marker(self, surface, x, y, size=5):
@@ -94,110 +92,182 @@ class ChessRenderer:
         pygame.draw.circle(surface, self.CENTER_MARKER_COLOR, (x, y), 2)
 
 
-    def board_to_pixel(self, board_pos):
+    # Update the piece-related methods in visualization.py to support vertical offset
+
+    def board_to_pixel(self, board_pos, y_offset=0):
         """Convert board coordinates (col, row floats) to pixel coordinates (center of square)."""
         col, row = board_pos
         px = col * self.square_size_px + self.square_size_px // 2 + self.board_x_offset
-        py = row * self.square_size_px + self.square_size_px // 2
+        py = row * self.square_size_px + self.square_size_px // 2 + y_offset
         return int(px), int(py)
-
-
-    def draw_piece(self, surface: pygame.Surface, piece: ChessPiece, selected=False):
+    
+    def draw_piece(self, surface: pygame.Surface, piece: ChessPiece, selected=False, y_offset=0):
         """Draws a single chess piece using its properties."""
         is_capturing = (not piece.active and piece.capture_path) # Check if being captured
         if not piece.active and not is_capturing: return # Don't draw inactive unless being captured
-
+    
         # --- Get Pixel Position ---
         x_center_rel, y_center_rel = piece.get_pixel_position()
         x_center = x_center_rel + self.board_x_offset # Apply board offset HERE
-        y_center = y_center_rel
+        y_center = y_center_rel + y_offset  # Apply y_offset
         # --- --------------- ---
-
+    
         symbol = piece.symbol
         text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
         # Make captured pieces semi-transparent during animation
         alpha = 255 if piece.active else 150
-
+    
         # Calculate dynamic font size
         base_size = self.square_size_px * 0.75 # Base size factor
         diameter_scale = max(0.8, min(1.2, piece.diameter / 40.0)) # Clamp scale factor
         size = int(base_size * diameter_scale)
         size = max(15, min(size, int(self.square_size_px * 0.9))) # Clamp absolute size
-
+    
         try:
             piece_font = pygame.font.SysFont('segoeuisymbol', size)
         except Exception:
             piece_font = pygame.font.Font(None, size) # Fallback
-
+    
         # Render with alpha if needed
         piece_text_surf = piece_font.render(symbol, True, text_color)
         if alpha < 255:
             piece_text_surf.set_alpha(alpha)
-
+    
         text_rect = piece_text_surf.get_rect(center=(x_center, y_center))
-
+    
         # Draw selection highlight UNDER the piece text
         if selected and piece.active:
             highlight_radius = int((piece.diameter / 2) * (self.square_size_px / 40) * 1.2) # Scale radius approx with square size
             highlight_radius = max(5, highlight_radius) # Min radius
             pygame.draw.circle(surface, self.HIGHLIGHT, (x_center, y_center), highlight_radius, 3)
-
+    
         # Draw the piece symbol
         surface.blit(piece_text_surf, text_rect)
-
+    
         # If enabled, draw a small dot at the exact mathematical position
         if self.show_position_dots and piece.active:
             pygame.draw.circle(surface, self.POSITION_DOT_COLOR, (x_center, y_center), 3)
-
+    
             # Also draw the board coordinates near the dot (using tiny font)
             col, row = piece.position
             coord_text = self.coord_font.render(f"({col:.1f},{row:.1f})", True, self.POSITION_DOT_COLOR)
             surface.blit(coord_text, (x_center + 5, y_center - 15)) # Adjust position
-
-
-    def draw_pieces(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None):
+    
+    
+    def draw_pieces(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None, y_offset=0):
         """Draws all pieces, handling active, inactive (capturing), and selected."""
         # Draw inactive pieces first (those being captured)
         for piece in pieces:
             if not piece.active and piece.capture_path:
-                self.draw_piece(surface, piece, selected=False) # Draw semi-transparent
-
+                self.draw_piece(surface, piece, selected=False, y_offset=y_offset) # Draw semi-transparent
+    
         # Draw active, non-selected pieces
         for piece in pieces:
             if piece.active and piece != selected_piece:
-                self.draw_piece(surface, piece, selected=False)
-
+                self.draw_piece(surface, piece, selected=False, y_offset=y_offset)
+    
         # Draw selected piece last (on top)
         if selected_piece and selected_piece.active:
-            self.draw_piece(surface, selected_piece, selected=True)
-
-
-    def draw_paths(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None):
+            self.draw_piece(surface, selected_piece, selected=True, y_offset=y_offset)
+    
+    
+    def draw_paths(self, surface: pygame.Surface, pieces: list[ChessPiece], selected_piece: ChessPiece = None, y_offset=0):
         """Draws the movement paths for pieces."""
         for piece in pieces:
             pixel_points = []
             path_to_draw = None
             path_color = self.PATH_COLOR
-
+    
             if piece.active and len(piece.path) > 1:
                 path_to_draw = piece.path
                 path_color = self.SEL_PATH_COLOR if piece == selected_piece else self.PATH_COLOR
             elif not piece.active and piece.capture_path: # Draw capture path for inactive
                 path_to_draw = piece.capture_path
                 path_color = self.CAPTURE_PATH_COLOR
-
+    
             if path_to_draw:
                 # Convert path points (col, row) to pixel coordinates
                 for pos in path_to_draw:
-                    px, py = self.board_to_pixel(pos) # Use helper function
+                    px, py = self.board_to_pixel(pos, y_offset=y_offset) # Use helper function with y_offset
                     pixel_points.append((px, py))
-
+    
                 if len(pixel_points) > 1:
                     pygame.draw.lines(surface, path_color, False, pixel_points, 2)
                     # Mark end point of capture path differently
                     if not piece.active and piece.capture_path:
                          pygame.draw.circle(surface, self.RED, pixel_points[-1], 5)
+    
 
+    def draw_captured_pieces_panel(self, surface, captured_white, captured_black, panel_x, window_height):
+        """Draws the captured pieces panel on the right side of the screen."""
+        # Panel dimensions
+        panel_width = 250
+
+        # Draw panel background
+        panel_rect = pygame.Rect(panel_x, 0, panel_width, window_height)
+        pygame.draw.rect(surface, self.DARK_GRAY, panel_rect)
+
+        # Draw panel title
+        title_text = self.font.render("Captured Pieces", True, self.WHITE)
+        title_rect = title_text.get_rect(center=(panel_x + panel_width // 2, 30))
+        surface.blit(title_text, title_rect)
+
+        # Section divider
+        divider_y = window_height // 2
+        pygame.draw.line(surface, self.WHITE, (panel_x, divider_y), (panel_x + panel_width, divider_y), 2)
+
+        # Draw black captured section
+        black_title = self.small_font.render("Black captured:", True, self.WHITE)
+        surface.blit(black_title, (panel_x + 10, 70))
+
+        # Draw white captured section
+        white_title = self.small_font.render("White captured:", True, self.WHITE)
+        surface.blit(white_title, (panel_x + 10, divider_y + 20))
+
+        # Draw captured black pieces
+        self._draw_captured_group(surface, captured_black, panel_x, 100, panel_width)
+
+        # Draw captured white pieces
+        self._draw_captured_group(surface, captured_white, panel_x, divider_y + 50, panel_width)
+
+    def _draw_captured_group(self, surface, captured_pieces, panel_x, start_y, panel_width):
+        """Draws a group of captured pieces in a grid layout."""
+        if not captured_pieces:
+            return
+
+        # Arrange in a grid
+        piece_size = 40  # Size for each piece display
+        spacing = 10     # Space between pieces
+        max_pieces_per_row = 4  # Number of pieces per row
+
+        # Calculate grid positions
+        row, col = 0, 0
+        for piece in captured_pieces:
+            # Calculate position
+            x = panel_x + 10 + col * (piece_size + spacing)
+            y = start_y + row * (piece_size + spacing)
+
+            # Draw piece background
+            piece_rect = pygame.Rect(x, y, piece_size, piece_size)
+            pygame.draw.rect(surface, self.LIGHT_GRAY, piece_rect)
+
+            # Draw piece symbol
+            try:
+                piece_font = pygame.font.SysFont('segoeuisymbol', 30)
+                text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
+                symbol_text = piece_font.render(piece.symbol, True, text_color)
+                symbol_rect = symbol_text.get_rect(center=(x + piece_size // 2, y + piece_size // 2))
+                surface.blit(symbol_text, symbol_rect)
+            except Exception as e:
+                print(f"Error drawing captured piece: {e}")
+
+            # Move to next position
+            col += 1
+            if col >= max_pieces_per_row:
+                col = 0
+                row += 1
+
+        return row + 1  # Return the number of rows used
 
     def draw_controls(self, surface: pygame.Surface, info: dict, panel_x, sliders_active=False):
         """Draws the control panel with info, stats, and placeholders for sliders."""
