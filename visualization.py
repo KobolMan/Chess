@@ -197,6 +197,47 @@ class ChessRenderer:
                     if not piece.active and piece.capture_path:
                          pygame.draw.circle(surface, self.RED, pixel_points[-1], 5)
     
+    def _draw_captured_group(self, surface, captured_pieces, panel_x, start_y, panel_width):
+        """Draws a group of captured pieces in a grid layout."""
+        if not captured_pieces:
+            return
+    
+        # Arrange in a grid
+        piece_size = 40  # Size for each piece display
+        spacing = 10     # Space between pieces
+        max_pieces_per_row = 4  # Number of pieces per row
+    
+        # Calculate grid positions
+        row, col = 0, 0
+        for piece in captured_pieces:
+            # Calculate position
+            x = panel_x + 10 + col * (piece_size + spacing)
+            y = start_y + row * (piece_size + spacing)
+    
+            # Draw piece background
+            piece_rect = pygame.Rect(x, y, piece_size, piece_size)
+            pygame.draw.rect(surface, self.LIGHT_GRAY, piece_rect)
+    
+            # Draw piece symbol
+            try:
+                piece_font = pygame.font.SysFont('segoeuisymbol', 30)
+                text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
+                symbol_text = piece_font.render(piece.symbol, True, text_color)
+                symbol_rect = symbol_text.get_rect(center=(x + piece_size // 2, y + piece_size // 2))
+                surface.blit(symbol_text, symbol_rect)
+            except Exception as e:
+                print(f"Error drawing captured piece: {e}")
+    
+            # Move to next position
+            col += 1
+            if col >= max_pieces_per_row:
+                col = 0
+                row += 1
+    
+        return row + 1  # Return the number of rows used
+
+    # --- FIX 2: Updated draw_captured_pieces_panel Method ---
+    # This ensures the captured pieces panel draws correctly and doesn't overlap
 
     def draw_captured_pieces_panel(self, surface, captured_white, captured_black, panel_x, window_height):
         """Draws the captured pieces panel on the right side of the screen."""
@@ -230,49 +271,68 @@ class ChessRenderer:
         # Draw captured white pieces
         self._draw_captured_group(surface, captured_white, panel_x, divider_y + 50, panel_width)
 
-    def _draw_captured_group(self, surface, captured_pieces, panel_x, start_y, panel_width):
-        """Draws a group of captured pieces in a grid layout."""
-        if not captured_pieces:
-            return
+    # --- FIX 3: Updated _create_pid_sliders Method ---
+    # Update this method to place sliders in the control panel
 
-        # Arrange in a grid
-        piece_size = 40  # Size for each piece display
-        spacing = 10     # Space between pieces
-        max_pieces_per_row = 4  # Number of pieces per row
+    def _create_pid_sliders(self):
+        """Creates the PID slider widgets in the control panel."""
+        if not WIDGETS_AVAILABLE: return
 
-        # Calculate grid positions
-        row, col = 0, 0
-        for piece in captured_pieces:
-            # Calculate position
-            x = panel_x + 10 + col * (piece_size + spacing)
-            y = start_y + row * (piece_size + spacing)
+        # Clear previous widgets if they exist (needed for resize)
+        self.pid_sliders.clear()
+        self.pid_textboxes.clear()
 
-            # Draw piece background
-            piece_rect = pygame.Rect(x, y, piece_size, piece_size)
-            pygame.draw.rect(surface, self.LIGHT_GRAY, piece_rect)
+        # Calculate slider positions based on controls panel
+        slider_width = self.CONTROLS_PANEL_WIDTH - 100  # Width of sliders, leave space for text
+        slider_x = self.controls_x + 30  # X position of sliders 
+        slider_y_start = 450  # Starting Y position (Adjust based on panel layout)
+        slider_spacing = 70  # Vertical space between sliders
 
-            # Draw piece symbol
-            try:
-                piece_font = pygame.font.SysFont('segoeuisymbol', 30)
-                text_color = self.WHITE if piece.color == PieceColor.WHITE else self.BLACK
-                symbol_text = piece_font.render(piece.symbol, True, text_color)
-                symbol_rect = symbol_text.get_rect(center=(x + piece_size // 2, y + piece_size // 2))
-                surface.blit(symbol_text, symbol_rect)
-            except Exception as e:
-                print(f"Error drawing captured piece: {e}")
+        # Ensure slider start position is reasonable within window height
+        if slider_y_start > self.window_height - 3 * slider_spacing:
+            slider_y_start = self.window_height - 3 * slider_spacing - 20  # Adjust if too low
 
-            # Move to next position
-            col += 1
-            if col >= max_pieces_per_row:
-                col = 0
-                row += 1
+        # --- Kp Slider ---
+        self.pid_sliders['kp'] = Slider(self.screen, slider_x, slider_y_start, slider_width, 20, 
+                                       min=0, max=200, step=1, initial=self.temp_pid_kp, 
+                                       colour=(200,200,200), handleColour=(0,150,0))
+        self.pid_textboxes['kp'] = TextBox(self.screen, slider_x + slider_width + 10, 
+                                         slider_y_start - 5, 50, 30, fontSize=18, 
+                                         borderThickness=0, colour=self.renderer.LIGHT_GRAY, 
+                                         textColour=self.renderer.BLACK)
+        self.pid_textboxes['kp'].disable()  # Read-only display
 
-        return row + 1  # Return the number of rows used
+        # --- Ki Slider ---
+        self.pid_sliders['ki'] = Slider(self.screen, slider_x, slider_y_start + slider_spacing, 
+                                       slider_width, 20, min=0, max=50, step=0.1, 
+                                       initial=self.temp_pid_ki, colour=(200,200,200), 
+                                       handleColour=(0,0,150))
+        self.pid_textboxes['ki'] = TextBox(self.screen, slider_x + slider_width + 10, 
+                                         slider_y_start + slider_spacing - 5, 50, 30, 
+                                         fontSize=18, borderThickness=0, 
+                                         colour=self.renderer.LIGHT_GRAY, 
+                                         textColour=self.renderer.BLACK)
+        self.pid_textboxes['ki'].disable()
+
+        # --- Kd Slider ---
+        self.pid_sliders['kd'] = Slider(self.screen, slider_x, slider_y_start + 2 * slider_spacing, 
+                                       slider_width, 20, min=0, max=200, step=1, 
+                                       initial=self.temp_pid_kd, colour=(200,200,200), 
+                                       handleColour=(150,0,0))
+        self.pid_textboxes['kd'] = TextBox(self.screen, slider_x + slider_width + 10, 
+                                         slider_y_start + 2 * slider_spacing - 5, 50, 30, 
+                                         fontSize=18, borderThickness=0, 
+                                         colour=self.renderer.LIGHT_GRAY, 
+                                         textColour=self.renderer.BLACK)
+        self.pid_textboxes['kd'].disable()
+
+        self._update_slider_textboxes()  # Set initial text
 
     def draw_controls(self, surface: pygame.Surface, info: dict, panel_x, sliders_active=False):
         """Draws the control panel with info, stats, and placeholders for sliders."""
-        self.panel_x = panel_x # Update panel_x based on current layout
-        panel_width = self.window_width - self.panel_x
+        self.panel_x = panel_x  # Update panel_x based on current layout
+        panel_width = 250  # Fixed width for control panel
+
         # Background
         pygame.draw.rect(surface, self.LIGHT_GRAY, (self.panel_x, 0, panel_width, self.window_height))
 
@@ -283,7 +343,7 @@ class ChessRenderer:
 
         # --- Info Area Start ---
         info_y = 70
-        line_height = 20 # Reduced line height slightly
+        line_height = 20  # Reduced line height slightly
         text_x = self.panel_x + 15
 
         def draw_text(text, y, color=self.BLACK, font=self.small_font):
@@ -293,7 +353,7 @@ class ChessRenderer:
 
         # --- Basic Controls ---
         info_y = draw_text("[Click] Piece/Target", info_y)
-        info_y = draw_text("[R] Reset & Apply PID", info_y) # Updated Reset description
+        info_y = draw_text("[R] Reset & Apply PID", info_y)  # Updated Reset description
         info_y = draw_text("[M] Cycle Pattern", info_y)
         info_y = draw_text("[+/-] Speed", info_y)
         info_y = draw_text("[Esc] Quit", info_y)
@@ -318,7 +378,7 @@ class ChessRenderer:
         draw_toggle('X', "Centers", info.get('show_center_markers', False), info_y + line_height, col2_x)
         draw_toggle('Y', "PosDots", self.show_position_dots, info_y + 2*line_height, col2_x)
 
-        info_y += 3*line_height + 5 # Advance past toggles
+        info_y += 3*line_height + 5  # Advance past toggles
 
         # --- Sim Info ---
         info_y = draw_text(f"Pattern: {info.get('current_pattern', 'N/A').upper()}", info_y)
@@ -327,9 +387,9 @@ class ChessRenderer:
         info_y = draw_text(f"Active PID: {active_gains[0]:.1f}/{active_gains[1]:.1f}/{active_gains[2]:.1f}", info_y, font=self.very_small_font)
         # Display temporary PID values from sliders if available
         if sliders_active and info.get('pid_gains_temp'):
-             temp_gains = info.get('pid_gains_temp', active_gains)
-             if temp_gains != active_gains: # Only show if different
-                 info_y = draw_text(f"Sliders-> R: {temp_gains[0]:.1f}/{temp_gains[1]:.1f}/{temp_gains[2]:.1f}", info_y, self.BLUE, font=self.very_small_font)
+            temp_gains = info.get('pid_gains_temp', active_gains)
+            if temp_gains != active_gains:  # Only show if different
+                info_y = draw_text(f"Sliders-> R: {temp_gains[0]:.1f}/{temp_gains[1]:.1f}/{temp_gains[2]:.1f}", info_y, self.BLUE, font=self.very_small_font)
 
         dbg_status = info.get('debug_mode', False)
         info_y = draw_text(f"[{'D'}] Debug Out: {'ON' if dbg_status else 'OFF'}", info_y, font=self.very_small_font)
@@ -337,17 +397,17 @@ class ChessRenderer:
 
         # --- Move Status & Stats ---
         selected = info.get('selected_piece')
-        target = info.get('target_position') # Target only shown during move
+        target = info.get('target_position')  # Target only shown during move
         status_color = self.BLACK
         status_text = "Status: Select Piece"
         if info.get('move_in_progress', False):
             status_text = "Status: MOVE IN PROGRESS"
             status_color = self.ORANGE
-        elif info.get('move_complete', False): # Use move_complete flag briefly set by ChessBoard
-             status_text = "Status: Move Complete"
-             status_color = self.GREEN
+        elif info.get('move_complete', False):  # Use move_complete flag briefly set by ChessBoard
+            status_text = "Status: Move Complete"
+            status_color = self.GREEN
         elif selected:
-             status_text = "Status: Target?"
+            status_text = "Status: Target?"
 
         info_y = draw_text(status_text, info_y, status_color)
 
@@ -366,9 +426,9 @@ class ChessRenderer:
 
         # --- PID Sliders Area ---
         if sliders_active:
-            slider_y_start = info_y + 20 # Leave more space before sliders
+            slider_y_start = info_y + 20  # Leave more space before sliders
             slider_spacing = 70
-            label_y_offset = -16 # Position label above slider
+            label_y_offset = -16  # Position label above slider
 
             # Kp
             kp_label = self.very_small_font.render("Kp (Proportional)", True, self.BLACK)
@@ -381,11 +441,6 @@ class ChessRenderer:
             surface.blit(kd_label, (text_x, slider_y_start + 2*slider_spacing + label_y_offset))
 
             # Note: Sliders and TextBoxes themselves are drawn by pygame_widgets.update() in the main loop
-            info_y = slider_y_start + 3 * slider_spacing # Update info_y to after sliders
-
-        # --- Capture Area ---
-        # Position capture area below sliders or stats
-        self.draw_capture_area(surface, info.get('captured_white',[]), info.get('captured_black',[]), panel_x, info_y + 10)
 
 
     def draw_capture_area(self, surface: pygame.Surface, captured_white: list, captured_black: list, panel_x, y_start_offset):
