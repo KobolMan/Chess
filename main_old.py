@@ -120,19 +120,7 @@ def main():
         traceback.print_exc()
         pygame.quit()
         sys.exit(1)
-    try:
-        from coil_grid_patch import patch_chess_simulation
-        import types
-        print("Applying optimized coil layout patch...")
-        patch_chess_simulation(board)
-        print("Optimized coil layout enabled!")
-    except ImportError as e:
-        print(f"Could not load optimized coil layout: {e}")
-        print("Using default coil grid instead.")
-    except Exception as e:
-        print(f"Error applying optimized coil layout: {e}")
-        import traceback
-        traceback.print_exc()
+
 
     # --- Print Instructions ---
     print("\n===== SMART ELECTROMAGNETIC CHESS =====")
